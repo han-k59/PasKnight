@@ -1,6 +1,6 @@
 ================================================================================
 PasKnight — a UCI chess engine
-Version 1.0.0
+Version 1.0.1, homepage https://sourceforge.net/projects/pasknight/
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -11,8 +11,8 @@ interface of its own; it runs as a console application and communicates through
 text commands with a GUI such as Arena, Cute Chess, BanksiaGUI, or WinBoard/
 XBoard (via a UCI-to-XBoard adapter).
 
-Estimated playing strength is roughly 2510-2540 Elo (self-play estimate). It is
-a classical hand-crafted-evaluation (HCE) engine — it does NOT use a neural
+Playing strength is about 2679 elo, see https://computerchess.org.uk/4040/index.html
+It is a classical hand-crafted-evaluation (HCE) engine — it does NOT use a neural
 network (NNUE). It runs on a single thread.
 
 --------------------------------------------------------------------------------
