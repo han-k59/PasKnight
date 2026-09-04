@@ -11,7 +11,7 @@ interface of its own; it runs as a console application and communicates through
 text commands with a GUI such as Arena, Cute Chess, BanksiaGUI, or WinBoard/
 XBoard (via a UCI-to-XBoard adapter).
 
-Estimated playing strength is about 2679, see https://computerchess.org.uk/4040/index.html
+Playing strength is about 2679, see https://computerchess.org.uk/4040/index.html
 It is a classical hand-crafted-evaluation (HCE) engine — it does NOT use a neural
 network (NNUE). It runs on a single thread.
 
