@@ -22,12 +22,12 @@ PasKnight is written in Object Pascal for the Free Pascal Compiler (FPC 3.2.2)
 and the Lazarus IDE. It is a single-file program plus one include file for the
 offline evaluation tuner.
 
-  - Engine:  pasknight_v100rc21.lpr
+  - Engine:  pasknight.lpr
   - Tuner:   pasknight_texel_tuner.pas  (compiled in only under -dTUNER)
 
 Build the engine from the command line with:
 
-    fpc -O3 pasknight_v100rc21.lpr
+    fpc -O3 pasknight.lpr
 
 This produces the UCI executable. The tuner is a separate offline build enabled
 by the TUNER define (see section 10); a normal engine build does not include it.

@@ -13,15 +13,19 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.   }
 uses
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
   {$IFDEF WINDOWS}Windows,{$ENDIF}
-  //{$DEFINE TUNER} //activate texel tuning
 
   SysUtils,
   Classes,
   DateUtils,
-  Math;
+  Math,
+  // v1.10: NNUE evaluation. The unit is deliberately independent of this
+  // program -- it knows nothing about TGameState, TPiece or TMove, and is
+  // driven through (PieceIdx, Square) pairs. That keeps it testable on its
+  // own and keeps the engine-side diff small enough to audit by eye.
+  pasknight_unit_nnue;
 
 const
-  Version: string = 'v1.0.1';
+  Version: string = 'v2.0.0ß1';
 
 
 {Some notes about terminology:
@@ -183,6 +187,355 @@ prunes almost all other move options in the tree. }
             Joint retune complete; aggregate result vs rc13 positive,
             measured strength ~2510-2540.
 
+  v2.0.0 NNUE evaluation (768 + side-to-move -> 256 -> 32 -> 1), as an
+            ALTERNATE eval path beside the hand-crafted eval (HCE), which is
+            unchanged and still selected with 'setoption name UseNNUE value
+            false'. Status at the time of writing: NNUE5s is the best net,
+            +186 +/- 13 Elo over the HCE at 40/7s; against other engines
+            PasKnight with NNUE5s plays at roughly 3000 (rough estimate from
+            matches against other engines, not a rating-list figure). NNUE6
+            and NNUE7 are being generated and trained. Plan: self-play
+            generations until the plateau, the pre-release items under NEXT
+            STEPS, then release as v2.0.0.
+
+            v2.0 HCE REMOVED (pre-release item g). The NNUE is now the only
+            evaluation; the hand-crafted eval lives on in the v1.0.1 tree.
+            Gone with it: Evaluate() and every eval table, the
+            pasknight_tuned_weights.pas include, the pawn hash and pawn key,
+            the pawn-structure masks, SliderAttacks, the UseNNUE option,
+            GenData's distillation mode and EvalTempo, 'nnue match' and
+            'nnue tempo'. Format-1 nets (NNUE1-5) are no longer loadable.
+            Without a net the engine refuses to search ('go' answers the
+            null move 0000 with an error line; bench, play and gendata
+            refuse). The HCE notes in this comment are kept as history.
+            Yardstick for net strength from now on: the v1.0.1 executable.
+            Bench reference: a FIXED net, NNUE5s = 4,829,554 (nnue9 =
+            6,664,436); the HCE bench 16,871,716 no longer exists.
+
+            ARCHITECTURE. Features (piece, square), 768 inputs, ONE white-POV
+            accumulator of 256, clipped ReLU, 256 -> 32 -> 1. No king buckets,
+            no PSQT skip connection. Int16 accumulator, int16 weights in every
+            layer (FPC emits no int8 SIMD, so int8 buys nothing here),
+            QA = QB = 1024, OUTPUT_SCALE = 400. Two file formats:
+              format 1 (NNUE1-5)   768 inputs, 410,344 bytes. A pure function
+                                   of piece placement: NNUE_Evaluate adds the
+                                   fixed tempo bonus and the side-to-move sign
+                                   flip itself, exactly as Evaluate() does.
+              format 2 (NNUE5s on) 768 inputs + a SIDE-TO-MOVE column of 256
+                                   weights, 410,856 bytes. The column is added
+                                   when Black is to move, at eval time, just
+                                   before the first CReLU -- NOT in the
+                                   incremental accumulator, so DoMakeMove is
+                                   unchanged. AVX2 adds it with a saturating
+                                   add (vpaddsw), exact because the CReLU
+                                   clamps to [0, QA] anyway. The net learns the
+                                   value of the move itself: NO external tempo
+                                   bonus (NNUE_HasStm). Worth +18 Elo against
+                                   the HCE at the same data (NNUE5 -> NNUE5s),
+                                   validation loss -2.15 %. Cost per eval:
+                                   negligible.
+              The loader accepts both; the side to move is a PARAMETER of
+              NNUE_EvalWhitePOV / NNUE_Trace, so no call site can silently
+              evaluate a black-to-move position as white-to-move.
+
+            ENGINE INTEGRATION.
+              * Every incremental board mutation passes through BB_PlacePiece /
+                BB_RemovePiece, so the accumulator is hooked there. En passant,
+                the castling rook and promotions are correct by construction.
+              * The engine searches by copy-restore, not unmake. The
+                accumulator stack INDEX lives in TGameState, so 'State :=
+                OldState' unwinds it for free.
+              * Forward pass: AVX2 kernels (dot product, accumulator add/sub,
+                vector CReLU) chosen at runtime by CPUID, SSE2 kept as the
+                fallback. 'setoption name UseAVX2 value false' forces SSE2.
+                Verified bit-identical over 23.7M bench nodes.
+              * Every isready reports 'info string eval: NNUE <file>' (v2.0.0alpha3:
+                or 'embedded net (<name>, <size> bytes)'), and every nnue
+                validation command first names the net it
+                is testing (v2.0: a testvec run against the default
+                pasknight.nnue instead of the new net once produced 64/64
+                MISMATCH for a perfectly good net).
+              * A failed EvalFile load never switches UseNNUE off. UseNNUE is
+                what the user asked for; NNUE_Available is whether a net is
+                loaded. Every diagnostic reports both.
+
+            TRAINING PIPELINE (Python, see HOWTO_create_nnue.md):
+              gendata selfplay  ->  merge_shuffle.py  ->  train_nnue.py  ->
+              export_nnue.py  ->  gates  ->  SPRT.
+              * Record: 32 bytes, full board (occupancy + one nibble per piece),
+                white-POV search score, side to move, phase, game result
+                (0 = unknown, so old files are never read as black wins), ply.
+              * Side-to-move input is the trainer DEFAULT (format 2);
+                --no-stm trains a format-1 net as NNUE1-5 were.
+              * Loss: MSE of sigmoids, target lambda * sigmoid(score) +
+                (1 - lambda) * result, K = 400, lambda annealed 1.0 -> 0.7 over
+                30 epochs, validation at fixed lambda 0.7, model selection on
+                validation loss. Game-result labels beat distillation from
+                Evaluate() by ~105 Elo at the same architecture.
+              * merge_shuffle splits train/val BY GAME (game boundaries from
+                the ply byte), so near-identical positions never straddle it.
+                It expands wildcards itself and prints the file list first:
+                use ONE pattern per data set (sp?.bin, n1_sp?.bin, ...), never
+                n*.bin, which would also take excluded sets.
+              * train_nnue decodes in 4M-position chunks (whole-file decoding
+                needed tens of GB at 80M+ positions; output bit-identical).
+              * Weight clip 0.95 plus L1 bias clip 1.5: the int16 accumulator
+                range check (bias + 32 largest weights per neuron) then passes
+                BY CONSTRUCTION. NNUE3 had reached 97% of int16 with the bias
+                unclipped.
+              * export_nnue quantizes, range-checks, round-trips the file and
+                writes 64 test vectors from nnue_quant_reference.py, the
+                integer-arithmetic specification the Pascal port must match.
+
+            DATA GENERATOR (-dNNUE_GENDATA build):
+              gendata selfplay <count> <file> [nodes] [seed] [book.epd | pgnbook]
+              * 5000 nodes per deepening iteration, ~8,600 nodes per move,
+                depth 6-7. The labeller is whichever eval is active; gendata
+                states it before starting.
+              * Openings: 6-12 SEE-filtered random plies from the start
+                position (generations 1-3), or a random line of the engine's
+                PGN book followed by 2-6 random plies (pgnbook, from generation
+                4, book 8moves_v3.pgn next to the executable). The extra plies
+                are needed because fixed-node search is deterministic. Keep the
+                ODD/EVEN MIX: whoever makes the last random move hands the
+                opponent the first searched move. Even counts only gave
+                48/27/23 W/D/B; the mixed 2-6 gives ~36/26/37.
+              * Every instance needs its own seed, and a seed range is never
+                reused. Used so far: 101, 201, 301, 401, 501, 601, 701, 801.
+              * start_selfplay.bat derives the file prefix and the net path from
+                one LABELLER setting, so the two cannot disagree (generation 5
+                was once run with the prefix updated and the net not).
+
+            GENERATIONS AND RESULTS (vs HCE at 40/7s unless stated):
+              gen files  labeller openings  pos  net (trained on)  vs HCE
+              1   sp     HCE      random    12M  NNUE1  (12M)      (+68 fixed nodes)
+              2   n1_    NNUE1    random    24M  NNUE2b (36M)      +113 +/- 13
+              3   n2_    NNUE2b   random    24M  NNUE3  (60M)      +134 +/- 11
+              4   n3_    NNUE3    book      24M  NNUE4  (84M)      +147 +/- 13
+              5   n4_    NNUE4    book      24M  NNUE5  (108M)     +168 +/- 13
+              -   (same data as gen 5, side-to-move)  NNUE5s (108M)     +186 +/- 13
+              6   n5s_   NNUE5s   book      24M  NNUE6  (132M)     in progress
+              7   n6_    NNUE6    book      24M  NNUE7  (156M)     in progress
+              Gain per generation against the HCE: +21, +13, +21, then +18 for
+              the side-to-move input. Each difference carries ~+/-18, so no
+              plateau is visible yet. STOP RULE: two generations in a row each
+              under ~+10 against the HCE. Naming from NNUE6 on: nnueN.nnue is a
+              format-2 net (no 's'); LABELLER=N in start_selfplay.bat gives the
+              files nN_sp0..5.bin. Not used: g2_ (HCE labels on the n1_ seeds,
+              deleted) and n3b_ (NNUE3 labels, even extra plies only, colour-
+              skewed, moved to old\).
+              NNUE4 was colour-asymmetric against the HCE (73 % as White, 67 %
+              as Black), traced to generation-4 data; NNUE5 was symmetric again
+              (72 % / 73 %).
+              Head-to-head against the predecessor has OVERSTATED the gain by up
+              to ~35 Elo (NNUE3 vs NNUE2b +55, real +21; NNUE4 vs NNUE3 +36,
+              real +13); NNUE5 vs NNUE4 (+23, real +21) and NNUE5s vs NNUE5
+              (+18 fixed nodes, +37 +/- 17 at 40/7s, real +18) agreed better.
+              The HCE is the yardstick; head-to-head is a sanity check only.
+              Other measurements:
+                distillation net vs HCE, fixed 30000 nodes   -37 +/- 15
+                NNUE2b vs HCE, fixed 30000 nodes            +160 +/- 10
+                NNUE3 vs NNUE2b, fixed 30000 nodes            +40 +/- 12
+
+            SPEED. Measured in real games (fixed-node PGN, where both sides
+            search equal trees): NNUE costs 1.35x the HCE's time per node in
+            moves 1-20, rising to ~1.55x from move 40, 1.42x overall -- the HCE
+            gets cheaper as pieces come off, NNUE barely does. bench 12 shows
+            only 1.25x because its positions are mostly middlegames (and
+            position 10, a forced mate, must be excluded from bench totals).
+            Worth ~47 Elo at 40/7s: NNUE2b is +160 at fixed nodes, +113 at
+            40/7s. All figures here predate the eval cache (item 2a below).
+
+            VALIDATION GATES, after every unit_nnue.pas change or new net
+            (v2.0: items 1 and 4 and 'nnue match' below are history -- the
+            HCE and format 1 are gone; the bench reference is NNUE5s):
+              1. bench 12 with UseNNUE false: node count identical to the HCE.
+              2. setoption name EvalFile value <absolute path>, then
+                 nnue testvec <file>: 64/64 exact.
+              3. nnue check 200000: exact at every ply, non-zero castles,
+                 promotions and en passants.
+              4. nnue tempo 50000: max error <= 2 cp (format 1 only; reports
+                 'not applicable' for format 2, whose side-to-move path is
+                 checked by testvec -- format-2 vectors carry w/b).
+                 After a unit_nnue.pas change also: bench 12 with a format-1
+                 net (NNUE5, kept with testvec5.txt for exactly this) gives the
+                 same node count in the old and the new build.
+              5. SPRT, fixed nodes first, then 40/7s. In cutechess every engine
+                 entry sets UseNNUE and an ABSOLUTE EvalFile explicitly; stored
+                 GUI options have silently turned a test into HCE vs HCE once.
+                 Opening suite: never the book used for self-play.
+              'nnue match' compares against Evaluate() and means nothing for a
+              net not trained on Evaluate() labels.
+
+            CORRECTIONS to the v2.0.0alpha1 notes:
+              * "A 23 cp deviation from Evaluate() costs nothing measurable"
+                was WRONG. That fixed-nodes SPRT ran the HCE on both sides
+                (cutechess had stored UseNNUE=false). The real cost of the
+                distillation net was -37 +/- 15.
+              * The 227k / 488k nps figures were SSE2. With AVX2 the per-node
+                cost is 1.25x on bench and 1.42x in real games (see SPEED).
+              * NNUE2b's first 40/7s result, +69, was depressed by a time-
+                control bug (forfeits on move 40, see Time management) and by
+                missing openings. Re-measured: +113.
+
+            LESSONS:
+              * Configuration bugs have looked like results three times (stored
+                cutechess option, missing net file in gendata, stale net path in
+                the self-play batch). Read the diagnostic lines every time.
+              * Transitive Elo inflates; measure against a fixed reference.
+              * Check whether one position dominates a benchmark total.
+              * A value that does not change can mean the switch does not work.
+              * PowerShell Tee-Object writes UTF-16: search the logs through
+                'type', not with findstr directly.
+              * A console window that stops updating is not a hung process:
+                clicking into it pauses output. Check Task Manager first.
+              * Test a cheap idea in the trainer before building it into the
+                engine: the side-to-move input was decided by two 30M-position
+                runs compared on validation loss (-1.28 %), then confirmed by
+                the full run (-2.15 %) and the SPRT (+18).
+
+            NEXT STEPS, in order:
+              1. Self-play generations (NNUE6, NNUE7, ...) until the stop rule
+                 above. One generation per test: each new net labels the next.
+              2. Before release (v2.0.0):
+                 a. Eval cache: Zobrist key -> eval, checked in EvaluatePos.
+                    Eval-neutral, so bench node counts must stay identical;
+                    only nps changes. Speed is worth ~47 Elo at 40/7s.
+                    DONE (2^17 packed 8-byte entries, see the header above
+                    EvaluatePos); bench now also prints per-position ms, nps
+                    excluding position 10 and the cache hit rate. Gates
+                    passed: bench HCE 16,871,716 and NNUE5s 4,829,554
+                    unchanged; testvec and check unchanged. nnue9 bench:
+                    +16 % nps (+17 % excluding position 10), 33 % hit rate.
+                    40/7s vs no cache: +25.0 +/- 6.4 over 3,920 games, mean
+                    depth +0.2 (moves 1-20) to +0.6 (move 81+) at equal time.
+                 b. Re-tune a few search margins (futility, razoring, LMR
+                    thresholds) for the NNUE eval scale -- they were tuned for
+                    the HCE. One SPRT per margin.
+                    Eval-scale-dependent margins (HCE-tuned values): RFP
+                    120/100 per ply (d1-3), razoring 300/500 (d1-2), futility
+                    200 (d1), qsearch delta 900 + piece, aspiration 25.
+                    NNUE/HCE scale measured 1.27 (|HCE| <= 400 cp), so the
+                    first candidate per margin is x1.25. Order: RFP,
+                    razoring, futility, delta, aspiration.
+                    TEST 1 RFP 150/125: neutral, -3.3 +/- 6.9 (LOS 17.4 %,
+                    3,369 games, 40/7s). Rejected, RFP stays 120/100.
+                    TEST 2 razoring (380, 640): neutral, +1.6 +/- 6.3 (LOS
+                    69.2 %, 4,118 games, 40/7s). Rejected, stays (300, 500).
+                    TEST 3 futility d1 250: neutral, +0.8 +/- 5.7 (LOS
+                    61.6 %, 4,910 games, 40/7s). Rejected, stays 200.
+                    Delta 900 -> 1150 skipped: three neutral results, and at
+                    900 + captured piece the change almost never alters a
+                    pruning decision.
+                    TEST 4 aspiration 32: ACCEPTED, +6.4 +/- 4.7 (LOS 99.6 %,
+                    7,334 games, 40/7s; LLR 3.34 by hand, bound 2.94).
+                    New bench references (bench 12): nnue5.nnue 6,128,336,
+                    nnue9 5,198,061.
+                    TEST 5 aspiration 40 (vs 32): +2.9 +/- 4.4 (LOS 89.9 %,
+                    8,167 games, LLR 0.38). Not a clear win; stays 32.
+                    TASK 4 DONE: only change ASP_INIT_DELTA 25 -> 32.
+                 c. MoveOverhead (30-50 ms): the tightest 1 % of 40/7s periods
+                    ended with only 20-70 ms on the clock.
+                    DONE, timing-driven, no UCI option: overhead = measured
+                    LAG peak + STOP peak + 5 ms, subtracted from wtime/btime
+                    before the allocation (floor 1 ms); 1 ms QPC clock; clock
+                    poll every ~1 ms (nps-calibrated) instead of every 10000
+                    nodes. See MOVE OVERHEAD at the globals. Allocation logic
+                    itself unchanged. Measured on this machine: LAG 0-1 ms,
+                    STOP 1-5 ms, overhead settles at 6-7 ms.
+                    Gates passed: bench unchanged. 40/7s vs the eval-cache
+                    build, 2,358 games: +414 -429 =1515 (neutral), no
+                    forfeits by either. 40/1s stress test, ~3,400 games:
+                    about 25 forfeits by the old build (5 of them scored as
+                    draws, 'Draw by timeout'), none by the new build; all on
+                    the last 1-3 moves before a time control.
+                    LESSON: the PGN 'clock left' is NOT a usable gate.
+                    cutechess writes move times with 2 significant digits, so
+                    the clock pgn_timecheck.py reconstructs is off by 15-20
+                    ms (1 sigma) per period, and its min over thousands of
+                    periods is mostly rounding noise. Count forfeits at a
+                    control short enough to make them frequent instead.
+                 d. DONE: Texel tuner and its TUNER hooks removed (v1.0.1 is
+                    kept separately); gate: HCE bench 16,871,716 unchanged.
+                 e. Default pasknight.nnue = the best net (v2.0.0alpha3: the
+                    default is the EMBEDDED net, see h); strength claims from
+                    games against other engines, not from self-play.
+                 f. OwnBook fix: 'setoption OwnBook false' only zeroed
+                    BookCount; the first isready (sent after the setoptions)
+                    loaded the book again and switched it back on. Now a real
+                    flag gates loading and use. Gates passed (bench
+                    unchanged; OwnBook false/true verified by hand). The book
+                    message now names the file(s) actually loaded.
+                 g. Remove the HCE and format-1 support (see "v2.0 HCE
+                    REMOVED" above). Gate: NNUE bench identical (NNUE5s
+                    4,829,554, nnue9 6,664,436), testvec 64/64, nnue check
+                    exact, Release and GenData compile. DONE: gates passed
+                    (bench NNUE5s 4,829,554 and nnue9 6,664,436 unchanged,
+                    testvec 64/64, nnue check exact, format-1 net refused).
+                    Files from here on: nnue5s.nnue is RENAMED nnue5.nnue
+                    (the format-1 NNUE5 is deleted), and pasknight.nnue is a
+                    copy of nnue9. Bench reference = nnue5.nnue (= the old
+                    NNUE5s) 4,829,554.
+                 h. v2.0.0alpha3: NET EMBEDDED IN THE EXECUTABLE. The startup
+                    net is pasknight_net.inc (const EMBEDDED_NET: array of
+                    byte, the .nnue byte for byte, ~1.7 MB of source, ~411 KB
+                    of exe), included by unit_nnue.pas. No file lookup, so the
+                    working directory no longer matters; a pasknight.nnue next
+                    to the exe is only loaded when EvalFile names it (a GUI
+                    entry stored with the old default still does).
+                    * Validation lives in ONE place, NNUE_CheckBuffer (magic,
+                      version, geometry, scales, exact size, checksum; size
+                      now before checksum). NNUE_LoadFromBuffer = check +
+                      copy; NNUE_Load (file) and NNUE_LoadEmbedded only supply
+                      the bytes. The embedded array is checked at every
+                      startup like a file.
+                    * 'nnue embed <file.nnue> <out.inc> [name]' checks a net
+                      with NNUE_CheckBuffer and writes the include (LF, via a
+                      .tmp file). Swap the embedded net: nnue embed, then
+                      rebuild Release and GenData.
+                    * EvalFile: default '<embedded>'; a path loads that file;
+                      an empty value or '<embedded>' returns to the embedded
+                      net. A FAILED external load leaves NO net (no fallback):
+                      a wrong path must stop a match or gendata, not quietly
+                      run the embedded net.
+                    * startup, uci, isready, help and every nnue command name
+                      the active net: 'embedded net (nnue9, 410856 bytes)' or
+                      the path.
+                    Gates: Release and GenData compile; embedded nnue9 with no
+                    .nnue in the folder bench 12 = 5,198,061, external
+                    nnue5.nnue 6,128,336; testvec 64/64 and nnue check exact
+                    for embedded and external; bad file (wrong size, format 1,
+                    missing) refused with no net loaded; exe +~411 KB; short
+                    match embedded nnue9 vs alpha2 + external nnue9 equal.
+                    Then embed nnue10 (the last net for some time) and record
+                    its bench as the new reference.
+                 i. v2.0.0beta1 (version string 'v2.0.0ß1'): UCI option
+                    'depth' REMOVED. It only capped 'go movetime' (default
+                    10, so fixed-time searches stopped at depth 10), was
+                    overwritten by every 'go depth N', was clamped to 20
+                    while advertising max 99, and a non-numeric value ended
+                    the engine. 'go movetime' now has the depth ceiling 50,
+                    like wtime/btime, nodes and infinite; 'go depth N' is the
+                    only depth limit. A stored GUI 'depth' option gets
+                    'unknown option "depth" (ignored)'. Unit renamed
+                    pasknight_unit_nnue, program file pasknight.lpr.
+                    Gates: bench 12 unchanged (bench does not use the go
+                    parser); go movetime 5000 passes depth 10; go depth 7
+                    stops at 7 and does not limit a following go movetime.
+                    40/7s play is on an unchanged code path: no SPRT.
+              3. After v2.0.0: two perspectives (shared weights, stm-relative
+                 output, 512 into layer 2), then king buckets on top: mirrored,
+                 ~4 buckets chosen from the measured king-square distribution,
+                 factorised training (shared 768 layer folded in at export),
+                 refresh at the END of DoMakeMove when a king changes bucket, a
+                 Finny table as a separate eval-neutral speed step, nnue check
+                 extended to bucket and mirror crossings. Trainable on the
+                 existing data.
+              4. Data diversity: an alternative balanced opening book now and
+                 then; positions from games against other engines, labelled by
+                 PasKnight's own search (labels from another engine would make
+                 the net a derivative).
+
   Abandoned on the path here (results retained in the Abandoned section):
     v0999/v0999b (history-malus asymmetry), v09991 (history decay),
     v09993 (history gravity), v09994 (correction history Phase 1),
@@ -211,12 +564,18 @@ Time management (rc3 series - the main post-pr1 search-side work)
     check. Partial-depth recovery keeps the last completed depth on abort.
     Current tuning: STABLE_ITERS_FOR_EASE = 3, STABLE_EASE_PCT = 70,
     EXCEED_CEILING_FACTOR_PCT = 150.
+  v2.0 FIX (also applies to v1.0.1): the ceiling clamp CeilingCapAlloc used a
+    fixed reserve of max(100 ms, 10%), also on the <= 500 ms path. With 100 ms
+    or less on the clock it went to zero or negative, and GetBestMove reads an
+    allocation <= 0 as NO TIME MANAGEMENT: an unlimited search and a certain
+    forfeit, typically on move 40 of a 40/x control. Now one Reserve (half the
+    clock at <= 500 ms, else max(100 ms, 10%)) feeds both clamps, and the final
+    allocation is at least 1 ms. Identical to the old code above 500 ms. After
+    the fix: 0 forfeits in 1,627 games at 40/7s; the tightest 1% of periods
+    still end with only 20-70 ms left.
   Open time-management items (post-v1.00 candidates):
-    - Safety: clamp ExceedCeilingAbortMs to the remaining clock minus the
-      reserve, so the 150% ceiling can never exceed the actual clock on the
-      move before a time control (matters for repeating movestogo controls).
-    - Optional: an explicit per-move MoveOverhead (20-50 ms) for GUI/comm
-      latency at fast controls.
+    - Move overhead: added in v2.0, measured from the GUI clock (no UCI
+      option), see MOVE OVERHEAD at the globals.
     - Continue fine-tuning STABLE_ITERS_FOR_EASE and STABLE_EASE_PCT.
 
 Search
@@ -335,7 +694,9 @@ Infrastructure
   formats), dual dataset support (Zurichess quiet-labeled.epd,
   lichess-big3-resolved), and a writer emitting the tuned block as
   drop-in Pascal. TUNE_NPARAMS = 992.
-  Not implemented: Endgame tablebases (Syzygy), Lazy SMP, NNUE.
+  The tuner was removed in v2.0 (kept in the v1.0.1 tree); HCE values frozen.
+  Not implemented: Endgame tablebases (Syzygy), Lazy SMP. NNUE: see the
+  v2.0.0 section above.
 
 Principal lessons carried forward:
   (1) v0997b/v0997c make main history exceptionally strong. Both
@@ -468,11 +829,8 @@ v1.00 RELEASE CHECKLIST (before tagging rc21 as v1.00)
 
 Roadmap (POST-v1.00 candidates, rough EV order; nothing below blocks the
          v1.00 release -- the feature set is frozen)
-    A. NNUE -- the standard path beyond the HCE ceiling; obsoletes the hand
-       eval. The usual sequencing (exhaust cheap HCE/NPS levers first, since
-       NPS gains carry over) is now essentially complete: magics, pawn hash,
-       lazy-SEE, packed TT and the full eval programme are all in. NNUE is
-       the natural next major direction after v1.00 ships.
+    A. NNUE -- IN PROGRESS in the v2.0 line; see the v2.0.0 section above
+       for status, results and the next steps.
     B. Search-shape candidates unblocked by rc9, each its own SPRT (with the
        lesson-8 paired removal-SPRT where fire conditions overlap):
          - eval-margin NMP term min((StaticEval-Beta) div 200, 2), now that
@@ -492,12 +850,12 @@ Roadmap (POST-v1.00 candidates, rough EV order; nothing below blocks the
        (king-attack tropism, trapped pieces, square-of-the-pawn). New terms
        would be born tuned via the existing exact-residual tuner, but the
        HCE eval is considered feature-complete for v1.00.
-    G. Time-management polish (the three open items above): ceiling clamp for
-       repeating movestogo controls, optional MoveOverhead, continued
-       STABLE_* fine-tuning.
+    G. Time-management polish: the movestogo ceiling clamp is DONE (v2.0 fix
+       above); move overhead DONE (v2.0, measured, see MOVE OVERHEAD);
+       open: continued STABLE_* fine-tuning.
 
 Out of scope for v1.00 / HCE phase
-    NNUE (see roadmap A), Lazy SMP, Syzygy tablebases.
+    Lazy SMP, Syzygy tablebases. (NNUE moved into the v2.0 line.)
 
 Estimated playing strength
     Pre-PeSTO baseline (~v0988):              ~2250
@@ -519,8 +877,14 @@ Estimated playing strength
     HCE ceiling for this design:              ~2550-2600 with the post-v1.00
                                               search-shape / correction-history
                                               items; NNUE required beyond.
+    v1.0.1 (HCE) on CCRL:                     ~2680
+    v2.0 NNUE line, self-play against the v1.0.1 HCE at 40/7s (not CCRL-
+    calibrated; self-play differences usually shrink against other engines):
+      NNUE2b +113, NNUE3 +134, NNUE4 +147, NNUE5 +168, NNUE5s +186.
+    v2.0 with NNUE8 against other engines:   ~3000 (rough, own matches)
 
-    }
+}
+
 type
   TPiece = (EMPTY, wP, wN, wB, wR, wQ, wK, bP, bN, bB, bR, bQ, bK);
   TBoard = array[0..7, 0..7] of TPiece;
@@ -554,15 +918,15 @@ type
     BlackKingR, BlackKingC: integer;
     HalfMoveClock: integer; // For 50-move rule
     Hash: QWord;           // Zobrist Hash for Transposition Table & Repetition
-    // v1.00-rc8: pawn-only Zobrist key. XOR of ZobristPiece[wP/bP,r,c]
-    // over every pawn on the board (nothing else — no side, castle or EP
-    // terms, because PASS 3 of Evaluate depends only on pawn placement).
-    // Maintained incrementally in DoMakeMove in lockstep with Hash, and
-    // computed from scratch by ComputePawnHash in InitState / ParseFEN.
-    // Because the engine searches by copy-restore (OldState := State ...
-    // State := OldState), this field is snapshotted and restored for free
-    // on every move undo — there is no separate unmake path to update.
-    PawnHash: QWord;       // v1.00-rc8: index into the pawn hash table
+    // v1.10: NNUE accumulator stack index. The accumulators themselves live
+    // in unit_nnue; this is just the slot number of the one that belongs to
+    // the current position. It sits in TGameState for exactly the same reason
+    // PawnHash does: the engine searches by copy-restore (OldState := State
+    // ... State := OldState), so this field is snapshotted and restored for
+    // free on every undo. There is no separate unmake path, and -- crucially
+    // -- none of the ten "State := OldState" sites needs to know the NNUE
+    // exists. Costs 4 bytes on a record that is already several hundred.
+    AccPtr: integer;
     GamePly: integer;      // Tracks repetition correctly inside Search
     FullMoveNumber: integer; // v1.00-rc3: standard FEN full-move number
                              // (starts at 1, increments after each Black
@@ -625,18 +989,6 @@ type
     Flag:     TTTFlag;  // 1 B — bound type ({$PACKENUM 1} above)
   end;
 
-  // v1.00-rc8: pawn hash table entry. Caches the PASS 3 (pawn-structure)
-  // contribution of Evaluate — two integers, the middlegame and endgame
-  // deltas summed over all files — keyed by the pawn-only Zobrist key
-  // (State.PawnHash). See the PawnHashTable var and the PASS 3 probe in
-  // Evaluate for the full rationale. Not packed: this tiny table wants speed,
-  // not density, and the few padding bytes are irrelevant next to the TT.
-  TPawnHashEntry = record
-    Key:   QWord;      // 8 B — full pawn Zobrist key (collision verification)
-    dMG:   integer;    // 4 B — PASS 3 middlegame contribution for this key
-    dEG:   integer;    // 4 B — PASS 3 endgame   contribution for this key
-    Valid: boolean;    // 1 B — slot has been written (distinguishes true 0)
-  end;
 
 const
   PieceChar: array[TPiece] of char =
@@ -646,196 +998,6 @@ const
 
 
 
-  // =========================================================================
-  // TEXEL-TUNABLE PARAMETER BLOCK  (best-validation snapshot).
-  //
-  // This whole region is the linear evaluation vector. Under -dTUNER it is
-  // `var` (the tuner overwrites it); otherwise `const`. The offline Texel
-  // tuner (pasknight_texel_tuner.pas) emits this entire block as drop-in
-  // Pascal — paste its output here verbatim to update the tuned values.
-  // Declaration ORDER below is load-bearing: the tuner's coefficient layout
-  // (TUNE_*_BASE offsets) mirrors it. Do not reorder, insert, or remove a
-  // declaration without updating the tuner; comment-only edits are safe.
-  //
-  // The single NONLINEAR term (SafetyTable, rc12 king safety) is NOT here —
-  // it lives outside this block and lands in the tuner's fixed residual.
-  // Everything below is linear in its entries and exact-residual verified
-  // (the tuner's linear model reproduces Evaluate bit-for-bit).
-  //
-  // TUNER MECHANICS THAT AFFECT THESE VALUES:
-  //   - "projected/re-centered": PSTs, piece values, and mobility tables
-  //     share a material/PST gauge (a constant added across a whole
-  //     sub-table is a per-piece material shift in disguise), so the tuner
-  //     removes each sub-table's mean from the gradient and re-centers it.
-  //     Terms that reach only a SUBSET of pieces/pawns (passed, connected,
-  //     outpost, threat, rook, king-passer, shield, doubled/iso/backward)
-  //     are NOT projected — their means are genuine signal and stay free.
-  //   - "frozen": unreachable or zero-coverage cells keep their seed through
-  //     tuning. If you paste a fresh tuned block, those remain exactly as
-  //     the writer emitted them — that is correct, not stale.
-  //   - Seeds are PLACEHOLDERS. Per the batch discipline, values are never
-  //     hand-tuned between features; the single joint retune sets them all.
-  //
-  // ---- Contents, in declaration order (phase / where / rationale) --------
-  //
-  //   PieceValueMG/EG[TPiece]            — material. MG & EG. PASS 1.
-  //   {Pawn,Knight,Bishop,Rook,Queen,King}PST_MG / _EG  — PSTs. PASS 1.
-  //       PeSTO-derived. Projected/re-centered per sub-table (see above).
-  //       Pawn PST ranks 1 & 8 (rows 0 and 7) are unreachable → frozen at 0.
-  //
-  //   PassedPawnMG/EG[0..7]              — passed pawns by RELATIVE rank.
-  //       MG & EG. PASS 3 (pawn-hash cached; depends only on pawn placement).
-  //       A passer's value is strongly nonlinear in rank, which a flat bonus
-  //       cannot express — hence the per-rank table. One shared table serves
-  //       both colours: white relRank = LERF rank; black = 7 − LERF rank.
-  //       Only the MOST ADVANCED pawn per file is tested. Entries 0 & 7
-  //       unreachable → frozen. NOT projected (bonus reaches only passers).
-  //
-  //   {Knight,Bishop,Rook,Queen}MobMG/EG[…] — mobility by SAFE move count.
-  //       MG & EG. PASS 5. Mobility value SATURATES (0→3 moves huge, 20→23
-  //       negligible), which a linear term cannot express — hence tables.
-  //       Index = PopCnt(attacks AND NOT own AND NOT enemy-pawn-attacks):
-  //       a square an enemy pawn guards is not real mobility (safe mobility,
-  //       rc21). Projected/re-centered like the PSTs (every piece of a type
-  //       lands in exactly one cell → same gauge as material). Safe mobility
-  //       lowers the reachable ceiling, so several TOP cells are unreachable
-  //       and frozen at seed — expected, not a bug.
-  //
-  //   PawnThreat{Minor,Rook,Queen}MG/EG, MinorThreat{Rook,Queen}MG/EG,
-  //   Hanging MG/EG                      — threat scalars (rc13). MG & EG.
-  //       PASS 7, from the PASS 5 attack maps. Count × scalar. Kept MODEST
-  //       on purpose: search already resolves one-move threats tactically;
-  //       these only nudge QUIET nodes toward pressure / keeping pieces
-  //       defended. Pawn→queen is MG-heavy (initiative), pawn→minor/rook
-  //       grow toward EG (fewer defensive resources). Hanging is small and
-  //       DELIBERATELY double-counts the specific threats (a queen both
-  //       attacked-by-pawn and undefended is worse than either alone).
-  //       Not projected/re-centered.
-  //
-  //   BadBishopPawnMG/EG                 — bad bishop, blocked-central form
-  //       (rc17). MG & EG (EG-heavy: a bishop hemmed by fixed pawns is an
-  //       endgame liability). PASS 5. Penalty per own pawn that is
-  //       simultaneously (a) on the bishop's colour complex, (b) BLOCKED
-  //       (a piece sits directly ahead in the advance direction), and (c) on
-  //       a central file (c–f). This isolates the true "bad bishop" (entombed
-  //       behind its own fixed central chain); counting every complex pawn,
-  //       as the old form did, over-penalised advanceable and rim pawns.
-  //       Positive magnitude, SUBTRACTED for white (white coeff negative).
-  //       Not projected/re-centered.
-  //
-  //   ConnectedMG/EG[0..7]               — connected/phalanx pawns by
-  //       relative rank (rc15). MG & EG. PASS 3 (pawn-hash cached — all
-  //       flags are pawn-placement-only). Per pawn that is supported or
-  //       phalanx: bonus = (2 + phalanx − opposed) × Connected[relRank];
-  //       the integer multiplier m∈{1,2,3} keeps it LINEAR, so the
-  //       coefficient of a cell is the net Σ of m. DELIBERATELY stacks with
-  //       doubled/isolated/backward/passed (different structural axes; an
-  //       isolated pawn is never connected, so those two cannot co-fire; a
-  //       connected passer SHOULD score both). Entries 0 & 7 unreachable →
-  //       frozen. Not projected/re-centered.
-  //
-  //   OutpostMG/EG[0..7]                 — knight outpost by relative rank
-  //       (rc15/rc16). MG & EG (MG-heavy). PASS 5. Conditions: relative
-  //       rank 4–6, defended by an own pawn, on a square no enemy pawn can
-  //       ever attack (WhiteOutpostMask/BlackOutpostMask). Only ranks 3,4,5
-  //       can fire → entries 0,1,2,6,7 frozen. Not projected/re-centered.
-  //   BishopOutpostMG/EG                 — half-weight bishop outpost, SAME
-  //       three conditions. A knight and a bishop on the same hole each
-  //       score their own term (two pieces, two outposts — not double count).
-  //
-  //   RookOn7thMG/EG,
-  //   RookBehindOwnPassedMG/EG,
-  //   RookBehindEnemyPassedMG/EG         — rook terms (rc18). MG & EG.
-  //       PASS 4. Rank-7: rook on relative rank 6/1 with the enemy king on
-  //       its back rank OR an enemy pawn still on its 2nd rank. Behind-passer
-  //       ("behind" = origin side of the pawn's advance) uses two LOCAL
-  //       bitboards wPassed/bPassed rebuilt fresh at the top of PASS 4 from
-  //       pawn placement — deliberately NOT added to the pawn-hash entry (no
-  //       layout change, no cache re-verification). A rook may score rank-7
-  //       AND a behind-passer term at once (distinct facts, not double
-  //       counting). LESSON: use (sq shr 3) for the LERF rank — SquareCoords
-  //       returns the MAILBOX ROW (7 − rank), which silently disabled the
-  //       rank-7 term in the first cut. Not projected/re-centered.
-  //
-  //   KingPassedEnemyEG, KingPassedOwnEG — king/passed-pawn distance (rc19).
-  //       EG-ONLY (no MG coefficient — king activity is an endgame concept;
-  //       in the middlegame the king wants shelter, handled by king safety /
-  //       shield). Per passer: + enemy × Cheb(enemyKing, front)
-  //       − own × Cheb(ownKing, front); front = advance square, Chebyshev
-  //       distance 0..7; two scalars so defender vs attacker proximity tune
-  //       independently. CACHE SAFETY: depends on KING squares, so it is
-  //       computed in the end-of-Evaluate king block, OUTSIDE the pawn hash
-  //       (caching a king-dependent term against the pawn key is a bug).
-  //       Distance-weighted coefficient. Not projected/re-centered.
-  //
-  //   ShieldMG[0..3]                     — pawn shield by advancement bucket
-  //       (rc20). MG-ONLY (shelter is irrelevant once the king must
-  //       activate). King-dependent → OUTSIDE the pawn hash. Per king-front
-  //       file, bucket = nearest shield pawn's advancement: 0 = directly in
-  //       front (ideal) … 3 = missing. SIGNED penalties (≤ 0): the function
-  //       returns their sum, ADDED for white / SUBTRACTED for black. Only
-  //       fires when the king is on its own first two ranks; off-board
-  //       shield files (a/h king) are skipped, not counted as missing.
-  //
-  //   DoubledPawnMG/EG, IsolatedPawnMG/EG, BackwardPawnMG/EG — pawn-structure
-  //       penalties (rc21 sweep; formerly hard-coded literals). MG & EG.
-  //       PASS 3 (pawn-hash cached). Positive magnitudes, SUBTRACTED for
-  //       white. Doubled is PER EXTRA pawn on a file (× (count − 1));
-  //       isolated = no own pawn on an adjacent file; backward = rear pawn
-  //       unsupported by adjacent files with its stop square attacked by an
-  //       enemy pawn. Not projected/re-centered.
-  // =========================================================================
-
-  {$IFDEF TUNER}var{$ELSE}const{$ENDIF}
-  // Texel-tuned PST + piece values (best-validation snapshot).
-  {$I pasknight_tuned_weights.pas}//External file, all weights and factors. Tuned with texel tuner
-  {$IFDEF TUNER}const{$ENDIF}
-
-  // =========================================================================
-  // v1.00-rc12 — King safety via attack units (CPW scheme).
-  //
-  // For each side, the "king zone" is the king ring (KingAttacks[ksq])
-  // plus the king square itself. During PASS 5 the raw attack set of
-  // every enemy knight/bishop/rook/queen — already computed there for
-  // mobility — is intersected with the zone. Each attacking piece
-  // contributes  weight * PopCnt(attacks AND zone)  attack units:
-  //     Knight 2   Bishop 2   Rook 3   Queen 5
-  // and bumps an attacker count. If a king has >= 2 distinct attackers,
-  // SafetyTable[min(units, 99)] is subtracted from that side's ScoreMG.
-  //
-  // Design notes:
-  //   - MG-only: in the endgame king exposure is handled by KingPST_EG
-  //     and the centre-distance term; the tapered blend fades this to
-  //     zero automatically, same as the pawn shield.
-  //   - The >= 2 attacker gate is the standard noise filter: one loose
-  //     piece near the king is not an attack, and without the gate the
-  //     term fires constantly in quiet positions.
-  //   - The table is convex: early units are nearly free, stacked
-  //     attackers escalate sharply. This is what a linear per-attacker
-  //     bonus cannot express and is the whole point of the table form.
-  //   - Deliberately NOT in the {$IFDEF TUNER}var block: the table is
-  //     indexed by a nonlinear function of the position (summed units),
-  //     so it does not fit the linear coefficient model. Its effect
-  //     lands in the tuner's fixed residual (TunerLastMG minus the
-  //     reconstructed tunable part), which is exactly where it belongs.
-  //     No tuner code change is required.
-  //   - Pawns and kings are not counted as attackers (standard; pawn
-  //     storms are a separate future term).
-  //
-  // Table and weights are the reference values from the chessprogramming
-  // wiki "King Safety" page (Glaurung-era lineage). Plateau at 500 cp.
-  // =========================================================================
-  SafetyTable: array[0..99] of integer = (
-      0,   0,   1,   2,   3,   5,   7,   9,  12,  15,
-     18,  22,  26,  30,  35,  39,  44,  50,  56,  62,
-     68,  75,  82,  88,  94,  97, 105, 113, 122, 131,
-    140, 150, 169, 180, 191, 202, 213, 225, 237, 248,
-    260, 272, 283, 295, 307, 319, 330, 342, 354, 366,
-    377, 389, 401, 412, 424, 436, 448, 459, 471, 483,
-    494, 500, 500, 500, 500, 500, 500, 500, 500, 500,
-    500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
-    500, 500, 500, 500, 500, 500, 500, 500, 500, 500,
-    500, 500, 500, 500, 500, 500, 500, 500, 500, 500);
 
 
 
@@ -889,54 +1051,7 @@ const
     QWord($4040404040404040), // File G
     QWord($8080808080808080));  // File H (LERF bits 7, 15, 23, ..., 63)
 
-  // v0984 — LERF rank inclusive bands. RanksAtOrBelow[r] is the bitboard
-  // of every square whose LERF rank is <= r (i.e. rank r itself plus all
-  // ranks below it in LERF order). RanksAtOrAbove[r] is the symmetric
-  // bitboard for "LERF rank >= r". Used by the v0984 pawn-structure
-  // evaluator to express the v0983 row comparisons (e.g. "adjacent-file
-  // pawn with row >= wPawnRear[c]") as single AND operations against
-  // the rear-most LERF rank of the candidate.
-  RanksAtOrBelow: array[0..7] of QWord = (
-    QWord($00000000000000FF),  // ranks <= 0
-    QWord($000000000000FFFF),  // ranks <= 1
-    QWord($0000000000FFFFFF),  // ranks <= 2
-    QWord($00000000FFFFFFFF),  // ranks <= 3
-    QWord($000000FFFFFFFFFF),  // ranks <= 4
-    QWord($0000FFFFFFFFFFFF),  // ranks <= 5
-    QWord($00FFFFFFFFFFFFFF),  // ranks <= 6
-    QWord($FFFFFFFFFFFFFFFF)); // ranks <= 7 (all)
-  RanksAtOrAbove: array[0..7] of QWord = (
-    QWord($FFFFFFFFFFFFFFFF),  // ranks >= 0 (all)
-    QWord($FFFFFFFFFFFFFF00),  // ranks >= 1
-    QWord($FFFFFFFFFFFF0000),  // ranks >= 2
-    QWord($FFFFFFFFFF000000),  // ranks >= 3
-    QWord($FFFFFFFF00000000),  // ranks >= 4
-    QWord($FFFFFF0000000000),  // ranks >= 5
-    QWord($FFFF000000000000),  // ranks >= 6
-    QWord($FF00000000000000)); // ranks >= 7
 
-  // =========================================================================
-  // v1.00-rc14 — Colour-complex masks (bad-bishop term).
-  //
-  // LERF square sq is LIGHT iff (rank + file) is odd, i.e. a1 (bit 0) is
-  // dark, b1 light, a2 light, ... The two constants below are the standard
-  // checkerboard bitboards. Used by the PASS 5 bishop loops: a bishop's
-  // colour complex is determined by testing its square bit against
-  // LightSquaresBB, and the bad-bishop penalty counts own pawns on that
-  // same complex with a single AND + PopCnt.
-  // =========================================================================
-  LightSquaresBB = QWord($55AA55AA55AA55AA);  // b1, d1, ..., a2, c2, ...
-  DarkSquaresBB  = QWord($AA55AA55AA55AA55);  // a1, c1, ..., b2, d2, ...
-
-  // v1.00-rc17 step 3: files c, d, e, f as a bitboard (LERF file indices
-  // 2..5). The improved bad-bishop term counts only BLOCKED own pawns on
-  // the bishop's colour complex, restricted to these central files — a
-  // blocked pawn on the a/b/g/h files barely obstructs a bishop's
-  // diagonals, whereas a blocked central pawn on the bishop's own colour
-  // is the textbook "bad bishop" that sits behind its own fixed pawn
-  // chain. Restriction is a single extra AND; dropping it (should the
-  // joint retune prefer all files) is just removing "and CentralFilesBB".
-  CentralFilesBB = QWord($3C3C3C3C3C3C3C3C); // files c..f on every rank
 
   CM_WK = 1;
   CM_WQ = 2;
@@ -976,34 +1091,6 @@ const
   HASH_MIN_MB     = 1;
   HASH_MAX_MB     = 4096;
 
-  // v1.00-rc8: pawn hash table sizing. The pawn structure repeats at very
-  // high rates during search, so a small direct-mapped table already gives
-  // a hit rate in the high-90s%. We do NOT tie its size to the main Hash MB
-  // option (which is deliberately spent on the TT); instead the pawn table
-  // is a fixed power-of-two count of entries. 2^16 = 65536 entries at
-  // SizeOf(TPawnHashEntry) = 24 B is ~1.5 MB — trivial next to the TT and
-  // small enough to stay largely resident in L2/L3, which is the whole
-  // point of the cache. PAWN_HASH_BITS is the log2 of the entry count; the
-  // index mask is (1 shl PAWN_HASH_BITS) - 1.
-  PAWN_HASH_BITS  = 16;               // 65536 entries
-  PAWN_HASH_SIZE  = 1 shl PAWN_HASH_BITS;
-  PAWN_HASH_MASK  = PAWN_HASH_SIZE - 1;
-
-  // =========================================================================
-  // Tapered evaluation phase weights (v0960).
-  // Each non-pawn non-king piece contributes a weight to the "game phase".
-  // The sum across both sides at the start of a game is MaxPhase = 24.
-  // As pieces are exchanged, the running phase decreases toward 0 (pure
-  // endgame). The blended score is then
-  //     (ScoreMG * phase + ScoreEG * (MaxPhase - phase)) div MaxPhase
-  // where phase=MaxPhase means full middlegame weight and phase=0 means
-  // full endgame weight. Weights are PeSTO/Rofchade
-  // =========================================================================
-  PhaseN  = 1;
-  PhaseB  = 1;
-  PhaseR  = 2;
-  PhaseQ  = 4;
-  MaxPhase = 24;
 
   // Delta pruning margin (queen value approximation)
   DELTA_MARGIN = 900;
@@ -1029,7 +1116,14 @@ const
   // PVS loop runs (the loop's `if Score > Alpha then Alpha := Score`
   // mutation is necessary for PVS at the root and is kept).
   ASP_MIN_DEPTH    = 5;       // skip aspiration at shallow depths
-  ASP_INIT_DELTA   = 25;      // initial half-width in centipawns
+  // v2.0 task 4, TEST 4 (aspiration): initial half-width x1.25 for the NNUE
+  // eval scale (NNUE = 1.27 x HCE). Was 25, HCE-tuned (v0996). ACCEPTED:
+  // +6.4 +/- 4.7 at 40/7s (7,334 games, LOS 99.6 %, LLR 3.34). Widening
+  // sequence becomes 32/64/128/256/512, then full window (was
+  // 25/50/100/200/400/800, then full).
+  // v2.0 task 4, TEST 5: 40 vs the accepted 32 was +2.9 +/- 4.4 (8,167
+  // games, LOS 89.9 %, LLR 0.38) -- not a clear win. Kept 32.
+  ASP_INIT_DELTA   = 32;      // initial half-width in centipawns (v2.0: was 25)
   ASP_MAX_DELTA    = 900;     // fall through to full window above this
   ASP_MATE_BOUND   = 28000;   // |score| above this -> use full window
 
@@ -1058,10 +1152,107 @@ var
   TMSumAllocMs: QWord = 0;   // sum of AllocatedTimeMs over past moves this game
   TMSumUsedMs:  QWord = 0;   // sum of actually elapsed search time
 
+// =========================================================================
+// v2.0: TIMING-DRIVEN MOVE OVERHEAD. No UCI option, no CPU-speed constant.
+//
+// The overhead is subtracted from the remaining clock BEFORE the time
+// allocation is computed, so every limit derived from the clock --
+// allocation, Reserve, CeilingCapAlloc and hence the mid-search abort
+// ceiling -- sits that far from zero. It is MEASURED, in milliseconds, from
+// two things the engine can time itself:
+//
+//   LAG (external): what the GUI charged for our previous move minus what we
+//     measured from reading 'go' to writing 'bestmove'. The GUI tells us the
+//     charge: our clock in this 'go' versus our clock in the previous one
+//     (+ increment). It covers pipe latency, the 'position' command before
+//     'go', OS scheduling when several games run at once -- everything the
+//     engine cannot see. One sample per move; skipped across a time-control
+//     refill (previous movestogo = 1), across games, and when the position
+//     is not our next move in the same game.
+//
+//   STOP (internal): on a move stopped by the mid-search abort ceiling, the
+//     time from the moment the ceiling was crossed to 'bestmove' written:
+//     the clock-poll gap, the unwind, partial-depth recovery, output.
+//
+// Each is a PEAK that decays by ~1/16 per new sample of its own kind, so one
+// bad spike is remembered for a few dozen moves, not forever. Overhead =
+// LAG peak + STOP peak + OVERHEAD_SAFETY_MS, capped at OVERHEAD_MAX_MS.
+// Until real samples exist the peaks start at LAG_INIT_MS + STOP_INIT_MS,
+// i.e. the 50 ms that was used as a fixed value before.
+//
+// Two supporting changes make the measured values small and CPU-independent:
+//   * ClockMs: a 1 ms clock (QueryPerformanceCounter on Windows). Windows'
+//     GetTickCount64 advances in ~15.6 ms steps, so every stop decision and
+//     the abort ceiling could be up to 16 ms late.
+//   * PollNodes: the clock / 'stop' poll in Search and Quiescence runs about
+//     every POLL_INTERVAL_MS of search, calibrated after every completed
+//     depth from the measured nodes per ms, instead of every 10000 nodes
+//     (25 ms at 400k nps, longer on a slower CPU).
+// None of this touches node counts: bench has no clock and no input.
+// Applied to wtime/btime only; 'go movetime' keeps its own fixed 50 ms margin.
+// =========================================================================
+const
+  OVERHEAD_SAFETY_MS = 5;      // fixed allowance on top of the two measured peaks
+  LAG_INIT_MS        = 30;     // starting LAG peak (no samples yet)
+  STOP_INIT_MS       = 15;     // starting STOP peak (no ceiling stops yet)
+  OVERHEAD_MAX_MS    = 1000;   // sanity cap on the overhead
+  SAMPLE_MAX_MS      = 2000;   // |sample| beyond this is not lag (refill, new game)
+  POLL_INTERVAL_MS   = 1;      // target time between clock polls
+  POLL_NODES_MIN     = 256;
+  POLL_NODES_MAX     = 10000;  // never coarser than the old fixed interval
+  POLL_CALIB_MIN_MS  = 8;      // only calibrate on depths that took this long
+
+var
+  PollNodes: integer = 1000;   // nodes between clock polls (calibrated)
+  LagPeakMs:  integer = LAG_INIT_MS;
+  StopPeakMs: integer = STOP_INIT_MS;
+  MoveOverheadMs: integer = LAG_INIT_MS + STOP_INIT_MS + OVERHEAD_SAFETY_MS;
+  GoTick: QWord = 0;           // ClockMs when the current 'go' was read
+  ClockGo: boolean = False;    // the current 'go' carried wtime/btime
+  CeilingHit: boolean = False; // the current search was stopped by the ceiling
+  LagPrevValid: boolean = False;
+  LagPrevClock, LagPrevInc, LagPrevMovestogo, LagPrevSide, LagPrevFullMove,
+  LagPrevOwnMs, LagSample, StopSample: integer;
+
+{$IFDEF WINDOWS}
+// Declared here rather than taken from the Windows unit, whose parameter type
+// for these two (LARGE_INTEGER record vs Int64) has varied between versions.
+function PK_QueryPerformanceCounter(out Count: Int64): LongBool; stdcall;
+  external 'kernel32.dll' name 'QueryPerformanceCounter';
+function PK_QueryPerformanceFrequency(out Freq: Int64): LongBool; stdcall;
+  external 'kernel32.dll' name 'QueryPerformanceFrequency';
+
+var
+  QPCTicksPerMs: Int64 = 0;
+
+function ClockMs: QWord;
+{**Monotonic milliseconds with 1 ms resolution (v2.0).**}
+var
+  c: Int64;
+begin
+  if QPCTicksPerMs = 0 then
+  begin
+    PK_QueryPerformanceFrequency(c);
+    QPCTicksPerMs := c div 1000;
+    if QPCTicksPerMs < 1 then QPCTicksPerMs := 1;
+  end;
+  PK_QueryPerformanceCounter(c);
+  Result := QWord(c div QPCTicksPerMs);
+end;
+{$ELSE}
+function ClockMs: QWord; inline;
+{**Monotonic milliseconds (v2.0). On Unix FPC's GetTickCount64 already reads
+CLOCK_MONOTONIC with 1 ms resolution.}
+begin
+  Result := GetTickCount64;
+end;
+{$ENDIF}
+
 var
   InputLine, BestMoveStr,ParamName,ParamValue, FENstr,MovesStr: string;
   SL: TStringList;
-  WTime, BTime, WInc, BInc, MyTime, MyInc, AllocatedTimeMs, HardDepthLimit, Movestogo,valpos,MovePos,FenStartPos,perftdepth,perror: integer;
+  EvalMsg: string;
+  WTime, BTime, WInc, BInc, MyTime, Reserve, MyInc, AllocatedTimeMs, HardDepthLimit, Movestogo,valpos,MovePos,FenStartPos,perftdepth,perror: integer;
   TimeDivisor: integer;    // effective moves-remaining divisor for this move
   EstMovesLeft: integer;   // sudden-death estimate of moves remaining
   MinAlloc: integer;   // v1.00-rc3e: control-relative minimum allocation
@@ -1069,12 +1260,11 @@ var
   BookInitialized,display: boolean;
 
   State: TGameState;
-  SearchDepth: integer;
   SearchNodes: int64;
   NodeLimit:   int64;   // Hard node limit for the current search. 0 = no limit.
   SearchStartTime: QWord;
   // v1.00-rc3f: the mid-search abort ceiling. During the search, the clock
-  // is polled every ~10000 nodes; if elapsed time exceeds this value the
+  // is polled every PollNodes nodes (~1 ms, v2.0); if elapsed time exceeds this value the
   // search is aborted immediately, wherever it is. This is the emergency
   // brake for a single iterative-deepening iteration that runs much longer
   // than the allocation predicted; in a normal move the between-iterations
@@ -1091,7 +1281,7 @@ var
   // GetBestMove depth iteration and updated at every node with the current
   // ply. Reported to the GUI as 'seldepth' alongside 'depth'.
   SelDepth: integer;
-  logname: string;
+  logname   : string;
 
   // Transposition Table — v0997: dynamic, resized via 'setoption name Hash'.
   // TTSize is always a power of 2; TTMask = TTSize - 1 is precomputed so the
@@ -1101,36 +1291,6 @@ var
   TT:     array of TTTEntry;
   TTMask: QWord;
 
-  // =========================================================================
-  // v1.00-rc8: pawn hash table.
-  //
-  // PASS 3 of Evaluate (doubled / isolated / passed / backward pawn terms)
-  // reads ONLY the two pawn bitboards and precomputed mask/attack tables. Its
-  // entire output is two integers: a middlegame delta (dMG) and an endgame
-  // delta (dEG), each already summed over all eight files. Those two numbers
-  // are a pure function of the pawn placement, which is captured exactly by
-  // State.PawnHash. So we cache (dMG, dEG) keyed by the pawn key.
-  //
-  // Layout: direct-mapped, index = PawnHash and PAWN_HASH_MASK. Each slot
-  // stores the full 64-bit key for verification (a mask collision between two
-  // different pawn structures must NOT return the wrong deltas) plus the two
-  // deltas. 'Valid' distinguishes a genuinely-stored zero-delta position
-  // (which is common — the initial pawn wall scores 0 in PASS 3) from an
-  // empty slot; without it a freshly-cleared table (Key = 0) could alias the
-  // real pawn key 0 and be read as a spurious hit.
-  //
-  // No aging / replacement policy is needed: the table is always-overwrite
-  // (last writer wins). A displaced entry simply causes a recompute next time
-  // that structure recurs, which is cheap and self-correcting. Because the
-  // cached value is the EXACT pass-3 result, a hit is bit-identical to the
-  // miss path — the table can never change a search decision, only its speed.
-  // (The TPawnHashEntry record itself is declared in the type section beside
-  // TTTEntry; only the array variable lives here.)
-  // =========================================================================
-
-  // Fixed-size direct-mapped pawn hash table (see PAWN_HASH_* constants).
-  // Allocated once by InitPawnHash at startup; never resized during search.
-  PawnHashTable: array of TPawnHashEntry;
 
   // Zobrist Hashing Keys
   ZobristPiece: array[0..12, 0..7, 0..7] of QWord;
@@ -1163,30 +1323,16 @@ var // Opening Book
    BookCount: integer;
    BookLoaded: boolean;
    bookFileName : string='*';
+   // v2.0: UCI option OwnBook. Gates both LOADING (isready / go) and USE
+   // (GetBestMove) of the engine's own book. Before v2.0, 'OwnBook false'
+   // only zeroed BookCount, and the first isready -- which a GUI sends AFTER
+   // its setoptions -- loaded the book again (~6 s for 8moves_v3.pgn) and
+   // switched it back on. GetBookMove itself is not gated: gendata's
+   // 'pgnbook' mode calls it directly and loads the book explicitly.
+   OwnBook: boolean = True;
    logfile: boolean=false;
 
 
-
-   function InputReadyOLD: Boolean; //**Non-blocking check for GUI input (detects "stop" command during search).**
-   {$IFDEF UNIX}
-   var
-     FDSet: TFDSet;
-     TimeVal: TTimeVal;
-   begin
-     fpFD_ZERO(FDSet);
-     fpFD_SET(0, FDSet);
-     TimeVal.tv_sec := 0;
-     TimeVal.tv_usec := 0;
-     Result := fpSelect(1, @FDSet, nil, nil, @TimeVal) > 0;
-   end;
-   {$ELSE}
-   var
-     Avail: DWORD;
-   begin
-     PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), nil, 0, nil, @Avail, nil);
-     Result := Avail > 0;
-   end;
-   {$ENDIF}
 
  function InputReady: Boolean;
  {$IFDEF UNIX}
@@ -1305,44 +1451,6 @@ var
   KingAttacks:   array[0..63] of QWord;
   RayMask:       array[0..7, 0..63] of QWord; // v0970 — classical bitboard slider rays
 
-  // v0984 — Pawn-structure mask tables. Populated by InitPawnMasks at
-  // startup. Replace the per-file integer arrays wPawnCount / wPawnFront
-  // / wPawnRear (and the black equivalents) that v0975..v0983 maintained
-  // inside Evaluate. Each per-file quantity is now derived on the fly
-  // via PopCnt / BsfQWord / BsrQWord against a file-mask AND with the
-  // side's pawn bitboard.
-  //
-  // AdjacentFileMask[c]   = FileMask[c-1] OR FileMask[c+1], with the
-  //   off-board neighbour for c=0 and c=7 dropped. Used for the
-  //   isolated-pawn test and for the rear-support side of the
-  //   backward-pawn heuristic.
-  // WhitePassedMask[sq]   = the squares an enemy black pawn would have
-  //   to occupy to block / capture a white pawn advancing from sq:
-  //   strictly in front of sq on file(sq), plus at-or-in-front of sq's
-  //   rank on the two adjacent files (off-board files dropped). A white
-  //   pawn at sq is passed iff (WhitePassedMask[sq] AND blackPawns) = 0.
-  //   Reproduces exactly the v0983 triple-condition row comparison on
-  //   bPawnFront[c-1..c+1] (strict on own file, <= on adjacent).
-  // BlackPassedMask[sq]   = symmetric for black: own-file strict and
-  //   adjacent-file at-or-in-front measured in the black advance
-  //   direction (falling LERF rank).
-  AdjacentFileMask: array[0..7]  of QWord;
-  WhitePassedMask:  array[0..63] of QWord;
-  BlackPassedMask:  array[0..63] of QWord;
-
-  // v1.00-rc14 — Outpost masks. WhiteOutpostMask[sq] is the bitboard of
-  // every square from which an enemy black pawn could NOW OR EVER attack
-  // sq: adjacent files, ranks strictly ahead of sq in the white advance
-  // direction (a black pawn on (lr+1, c±1) attacks (lr, c); one further
-  // back it can advance into that attacking post). A white knight on sq
-  // sits on a permanent hole iff (WhiteOutpostMask[sq] AND bPawns) = 0.
-  // Note this is exactly the adjacent-file half of WhitePassedMask
-  // shifted one rank forward (strict instead of at-or-above): the
-  // own-file component is irrelevant because a pawn never attacks
-  // straight ahead. BlackOutpostMask is the mirror. Populated by
-  // InitPawnMasks.
-  WhiteOutpostMask: array[0..63] of QWord;
-  BlackOutpostMask: array[0..63] of QWord;
 
 // =====================================================================
 // v1.00-rc7 — Plain magic bitboards (the one and only slider baseline;
@@ -1694,97 +1802,6 @@ end;
 {$pop}
 
 
-procedure InitPawnMasks;
-{**v0984 — populate the pawn-structure mask tables.**
- Called once at startup, after InitAttackTables. Independent of state.
-
- AdjacentFileMask[c]  - bitboard of all squares on files c-1 and c+1.
-                        The off-board neighbour for c=0 and c=7 is
-                        silently dropped, so the (c>0)/(c<7) guards of
-                        v0983 are no longer needed at the call site.
-                        Used by the isolated-pawn test and by the
-                        rear-support side of the backward-pawn test.
- WhitePassedMask[sq]  - bitboard of every square an enemy black pawn
-                        would have to occupy (now or after the white
-                        pawn at sq advances) to stop the white pawn
-                        from queening on its own file. Specifically:
-                          - strictly in front of sq on file(sq), and
-                          - at-or-in-front of sq's rank on files c-1
-                            and c+1 (off-board files dropped).
-                        A white pawn at sq is passed iff
-                          (WhitePassedMask[sq] AND blackPawns) = 0.
- BlackPassedMask[sq]  - symmetric for black: the file is read top-down
-                        (advancing = lower LERF rank) and the masks
-                        cover strictly in front on own file plus
-                        at-or-in-front on adjacent files in the black
-                        advance direction.
-
- Equivalence proof (white, file c, wFront = wPawnFront[c]):
-   v0983 "blocked" tests:
-     bPawnFront[c]   <  wPawnFront[c]   (own file, strict)
-     bPawnFront[c-1] <= wPawnFront[c]   (left  neighbour, inclusive)
-     bPawnFront[c+1] <= wPawnFront[c]   (right neighbour, inclusive)
-   These three are taken over the front-most black pawn on each file,
-   but "front-most black <= R" is logically the same as "exists black
-   pawn with row <= R" — which is exactly what
-   (WhitePassedMask[wFrontSq] AND bPawns) <> 0 asks, with off-board
-   files already trimmed and "strict on own file" encoded by the
-   RanksAtOrAbove[lr+1] shift below.
-
- The masks also seed future work (v0984+): pawn span, candidate
- passers, connected/phalanx pawns, and outpost squares all reduce to
- a single AND against a precomputed mask of this shape.}
-var
-  sq, c, lr: integer;
-begin
-  // -------- Adjacent-file masks (8 entries) --------
-  for c := 0 to 7 do
-  begin
-    AdjacentFileMask[c] := 0;
-    if c > 0 then AdjacentFileMask[c] := AdjacentFileMask[c] or FileMask[c - 1];
-    if c < 7 then AdjacentFileMask[c] := AdjacentFileMask[c] or FileMask[c + 1];
-  end;
-
-  // -------- Per-square passed-pawn masks --------
-  // lr = LERF rank of sq (0..7), c = file of sq (0..7).
-  for sq := 0 to 63 do
-  begin
-    lr := sq shr 3;
-    c  := sq and 7;
-
-    // White passed mask: own file strictly above (lr+1..7), adjacent
-    // files at-or-above (lr..7). White advance direction = rising LERF
-    // rank, so "in front" = higher LERF rank.
-    WhitePassedMask[sq] := AdjacentFileMask[c] and RanksAtOrAbove[lr];
-    if lr < 7 then
-      WhitePassedMask[sq] := WhitePassedMask[sq] or
-                             (FileMask[c] and RanksAtOrAbove[lr + 1]);
-
-    // Black passed mask: own file strictly below (0..lr-1), adjacent
-    // files at-or-below (0..lr). Black advance direction = falling
-    // LERF rank, so "in front" = lower LERF rank.
-    BlackPassedMask[sq] := AdjacentFileMask[c] and RanksAtOrBelow[lr];
-    if lr > 0 then
-      BlackPassedMask[sq] := BlackPassedMask[sq] or
-                             (FileMask[c] and RanksAtOrBelow[lr - 1]);
-
-    // v1.00-rc14 — Outpost masks: adjacent files, ranks STRICTLY ahead.
-    // White: a black pawn anywhere on files c±1, LERF rank lr+1 or
-    // higher, can (after zero or more advances) attack sq. Same rank or
-    // behind can never attack sq — black pawns only move down. Black is
-    // the mirror. On the last rank in the advance direction the mask is
-    // empty (no rank strictly ahead), which is correct: nothing can
-    // ever attack the square by pawn.
-    if lr < 7 then
-      WhiteOutpostMask[sq] := AdjacentFileMask[c] and RanksAtOrAbove[lr + 1]
-    else
-      WhiteOutpostMask[sq] := 0;
-    if lr > 0 then
-      BlackOutpostMask[sq] := AdjacentFileMask[c] and RanksAtOrBelow[lr - 1]
-    else
-      BlackOutpostMask[sq] := 0;
-  end;
-end;
 
 
 function IsWhite(Piece: TPiece): boolean;
@@ -1793,9 +1810,69 @@ begin
 end;
 
 
+// =========================================================================
+// v1.10: NNUE integration globals.
+//
+// v2.0: the NNUE is the only evaluation (the hand-crafted eval was removed;
+// v1.0.1 keeps it). With no weight file loaded every hook below is a single
+// predictable boolean test, and the engine refuses to search (see 'go').
+//
+// NNUE_Suspend is a separate, finer gate. GenerateLegalMoves makes and
+// unmakes every pseudo-legal move purely to test for check, and never
+// evaluates anything inside that loop. Maintaining the accumulator across
+// ~40 make/unmake pairs per call would cost a 512-byte copy each time for no
+// benefit whatsoever. Suspending the hooks there is safe because the loop
+// always restores State afterwards, so the accumulator is left untouched and
+// therefore still correct for the position we return to.
+//
+// INVARIANT: a suspended region must never call EvaluatePos, and must always
+// restore State. Do not extend the suspend to the move loops in Search or
+// Quiescence -- those DO evaluate the resulting positions.
+// =========================================================================
+// v2.0.0alpha3: the net is EMBEDDED in the executable (pasknight_net.inc,
+// written by 'nnue embed'). EvalFileName is the net the user asked for:
+// EVALFILE_EMBEDDED, or the path given with 'setoption name EvalFile'. It is
+// kept also when that load FAILED -- then no net is loaded, the engine refuses
+// to search, and every refusal message names the path that failed.
+const
+  EVALFILE_EMBEDDED = '<embedded>';  // lower case: setoption values arrive lower-cased
+var
+  EvalFileName: string = EVALFILE_EMBEDDED;        // UCI option "EvalFile"
+  NNUE_Suspend: boolean = False;                   // see comment above
+
+function ActiveNetDesc: string;
+// The net in use, for every message that names it: 'embedded net (nnue9,
+// 410856 bytes)' or the external file's path. Only meaningful while
+// NNUE_Available; otherwise EvalFileName is the request that failed.
+begin
+  if EvalFileName = EVALFILE_EMBEDDED then
+    Result := NNUE_EmbeddedDesc
+  else
+    Result := EvalFileName;
+end;
+
+// NOTE: the "is the accumulator live?" test is written out at each of its
+// three sites rather than wrapped in a helper. BB_PlacePiece / BB_RemovePiece
+// are inline and on the hottest path in the engine, and FPC cannot inline a
+// call inside an inlined routine -- a helper would therefore cost a real call
+// per board mutation.
+// Three boolean loads, expanded, cost nothing measurable.
+
 procedure BB_PlacePiece(P: TPiece; sq: integer); inline;
 // Adds piece P at bit position sq to the State bitboards. Maintains
 // piece, color-occupancy, and total-occupancy in one place.
+//
+// v1.10: this is also where the NNUE accumulator is updated. Every
+// incremental board mutation in the engine passes through BB_PlacePiece /
+// BB_RemovePiece -- the en-passant victim, both pieces of a castle, and the
+// pawn/promoted-piece swap of a promotion all go through here, because the
+// bitboards need them just as much as the accumulator does. Hooking this
+// choke point rather than enumerating the special cases in DoMakeMove makes
+// those cases correct by construction: there is no branch to forget.
+//
+// The pointer is re-read from State.AccPtr on every call rather than cached,
+// so the unit's idea of the current slot can never drift from the engine's
+// across a copy-restore.
 var bit: QWord;
 begin
   bit := QWord(1) shl sq;
@@ -1805,9 +1882,16 @@ begin
   else
     State.Occupied[1] := State.Occupied[1] or bit;
   State.AllOccupied := State.AllOccupied or bit;
+  if NNUE_Available and (not NNUE_Suspend) then
+  begin
+    NNUE_SetPtr(State.AccPtr);
+    NNUE_Add(Ord(P) - 1, sq);   // Ord(EMPTY)=0, so wP..bK map to 0..11
+  end;
 end;
 
 procedure BB_RemovePiece(P: TPiece; sq: integer); inline;
+// v1.10: mirror of BB_PlacePiece; see the comment there for why the NNUE
+// hook lives here and not in DoMakeMove.
 var bit: QWord;
 begin
   bit := QWord(1) shl sq;
@@ -1817,6 +1901,36 @@ begin
   else
     State.Occupied[1] := State.Occupied[1] and not bit;
   State.AllOccupied := State.AllOccupied and not bit;
+  if NNUE_Available and (not NNUE_Suspend) then
+  begin
+    NNUE_SetPtr(State.AccPtr);
+    NNUE_Sub(Ord(P) - 1, sq);
+  end;
+end;
+
+procedure NNUE_FullRefresh;
+// v1.10: recompute the accumulator from the mailbox into slot 0 and reset the
+// stack pointer.
+//
+// Called from the end of RebuildBitboardsFromBoard, which means InitState and
+// ParseFEN get it for free -- those are the only two places that populate
+// State.Board by bulk assignment instead of going through BB_PlacePiece, so
+// they are exactly the two places the incremental path cannot cover. Also
+// called once per search from GetBestMove.
+//
+// State.AccPtr is reset even when no net is loaded, so that loading one
+// mid-game starts from a sane slot.
+var r, c: integer; P: TPiece;
+begin
+  State.AccPtr := 0;
+  if not NNUE_Available then Exit;
+  NNUE_RefreshBegin;
+  for r := 0 to 7 do
+    for c := 0 to 7 do
+    begin
+      P := State.Board[r, c];
+      if P <> EMPTY then NNUE_RefreshAdd(Ord(P) - 1, SquareIndex(r, c));
+    end;
 end;
 
 procedure RebuildBitboardsFromBoard;
@@ -1846,6 +1960,10 @@ begin
       end;
     end;
   State.AllOccupied := State.Occupied[0] or State.Occupied[1];
+  // v1.10: the mailbox was filled by bulk assignment, so BB_PlacePiece was
+  // never called and the incremental accumulator hooks never fired. Rebuild
+  // it from scratch here; this covers InitState and ParseFEN in one place.
+  NNUE_FullRefresh;
 end;
 
 
@@ -2023,67 +2141,6 @@ begin
 end;
 
 
-function ComputePawnHash: QWord;
-{**Calculates the pawn-only Zobrist key from scratch (v1.00-rc8).**
-
- This is the pawn-hash-table analogue of ComputeHash: it XORs together the
- SAME ZobristPiece constants that the full key uses, but only for the white
- and black pawns, and deliberately omits side-to-move, castling and en-passant
- terms — PASS 3 of Evaluate depends on none of those. Two positions with the
- identical pawn skeleton therefore share a pawn key even if they differ in
- side to move or castling rights, which is exactly what makes the >95% hit
- rate possible.
-
- Slow (scans both pawn bitboards), so like ComputeHash it is only called at
- setup time (InitState / ParseFEN). During search the key is maintained
- incrementally in DoMakeMove.}
-var
-  bb: QWord;
-  sq, r, c: integer;
-begin
-  Result := 0;
-  // White pawns
-  bb := State.Pieces[wP];
-  while bb <> 0 do
-  begin
-    sq := Integer(BsfQWord(bb));
-    bb := bb and (bb - 1);
-    SquareCoords(sq, r, c);
-    Result := Result xor ZobristPiece[Ord(wP), r, c];
-  end;
-  // Black pawns
-  bb := State.Pieces[bP];
-  while bb <> 0 do
-  begin
-    sq := Integer(BsfQWord(bb));
-    bb := bb and (bb - 1);
-    SquareCoords(sq, r, c);
-    Result := Result xor ZobristPiece[Ord(bP), r, c];
-  end;
-end;
-
-
-procedure InitPawnHash;
-{**Allocates and clears the pawn hash table (v1.00-rc8).**
- Called once at program startup. The table is a fixed power-of-two size
- (PAWN_HASH_SIZE) and is never resized afterwards, so unlike the TT there is
- no runtime ResizeHash counterpart — a single SetLength here is enough.}
-begin
-  SetLength(PawnHashTable, PAWN_HASH_SIZE);
-end;
-
-
-procedure ClearPawnTT;
-{**Empties the pawn hash table (v1.00-rc8).**
- Zeroing the record array sets Key = 0 and Valid = False in every slot, so no
- stale entry from a previous position/game can be read as a hit. Called at the
- same points as ClearTT (new game / 'ucinewgame'), keeping the two caches in
- sync — a pawn-structure delta from a different game is never reused.}
-begin
-  if Length(PawnHashTable) > 0 then
-    FillChar(PawnHashTable[0],
-             SizeInt(Length(PawnHashTable)) * SizeInt(SizeOf(TPawnHashEntry)), 0);
-end;
 
 
 procedure ClearTT;
@@ -2172,9 +2229,6 @@ begin
   FillChar(History, SizeOf(History), 0);
 
   RebuildBitboardsFromBoard; // v0967: derive bitboards from the freshly-filled mailbox
-  // v1.00-rc8: pawn key computed AFTER the bitboards exist (ComputePawnHash
-  // scans State.Pieces[wP]/[bP], which RebuildBitboardsFromBoard just filled).
-  State.PawnHash := ComputePawnHash;
 end;
 
 
@@ -2904,6 +2958,21 @@ var
   OldCastleMask, OldEPC: integer;
   FromSq, ToSq: integer; // v0967
 begin
+  // v1.10: descend one accumulator slot BEFORE any board mutation. Every
+  // BB_PlacePiece / BB_RemovePiece below will then write into the child slot,
+  // leaving the parent's accumulator intact for the copy-restore unwind.
+  // State.AccPtr is part of TGameState, so "State := OldState" pops it for
+  // free -- there is nothing to undo here.
+  //
+  // This must stay the first statement of the procedure. Moving it below any
+  // BB_ call would apply that call's delta to the parent slot and corrupt it.
+  if NNUE_Available and (not NNUE_Suspend) then
+  begin
+    NNUE_SetPtr(State.AccPtr);
+    NNUE_Push;
+    State.AccPtr := NNUE_Ptr;
+  end;
+
   MovingPiece := State.Board[Move.FromR, Move.FromC];
   CapturedPiece := State.Board[Move.ToR, Move.ToC];
 
@@ -2915,16 +2984,6 @@ begin
   if CapturedPiece <> EMPTY then
     State.Hash := State.Hash xor ZobristPiece[Ord(CapturedPiece), Move.ToR, Move.ToC];
 
-  // v1.00-rc8: mirror the pawn-relevant part of the removal into the
-  // pawn-only key. A moving pawn leaves its origin square; a captured pawn
-  // (normal capture on the destination — en passant is handled in its own
-  // block below) leaves the target square. We reuse the identical
-  // ZobristPiece constants the full key just XORed, so the two keys stay in
-  // lockstep by construction.
-  if (MovingPiece = wP) or (MovingPiece = bP) then
-    State.PawnHash := State.PawnHash xor ZobristPiece[Ord(MovingPiece), Move.FromR, Move.FromC];
-  if (CapturedPiece = wP) or (CapturedPiece = bP) then
-    State.PawnHash := State.PawnHash xor ZobristPiece[Ord(CapturedPiece), Move.ToR, Move.ToC];
 
   // 50-Move Rule Clock - reset on pawn move or capture
   if (MovingPiece = wP) or (MovingPiece = bP) or (CapturedPiece <> EMPTY) then
@@ -2946,9 +3005,6 @@ begin
       begin
         CapturedPiece := State.Board[Move.ToR + 1, Move.ToC]; // Black pawn
         State.Hash := State.Hash xor ZobristPiece[Ord(CapturedPiece), Move.ToR + 1, Move.ToC];
-        // v1.00-rc8: the en-passant victim is always a pawn, so its removal
-        // always affects the pawn key (unconditional mirror).
-        State.PawnHash := State.PawnHash xor ZobristPiece[Ord(CapturedPiece), Move.ToR + 1, Move.ToC];
         State.Board[Move.ToR + 1, Move.ToC] := EMPTY;
         BB_RemovePiece(CapturedPiece, SquareIndex(Move.ToR + 1, Move.ToC));
       end
@@ -2956,8 +3012,6 @@ begin
       begin
         CapturedPiece := State.Board[Move.ToR - 1, Move.ToC]; // White pawn
         State.Hash := State.Hash xor ZobristPiece[Ord(CapturedPiece), Move.ToR - 1, Move.ToC];
-        // v1.00-rc8: en-passant victim is always a pawn (unconditional mirror).
-        State.PawnHash := State.PawnHash xor ZobristPiece[Ord(CapturedPiece), Move.ToR - 1, Move.ToC];
         State.Board[Move.ToR - 1, Move.ToC] := EMPTY;
         BB_RemovePiece(CapturedPiece, SquareIndex(Move.ToR - 1, Move.ToC));
       end;
@@ -3005,17 +3059,6 @@ begin
   if Move.Promotion <> EMPTY then
   begin
     State.Hash := State.Hash xor ZobristPiece[Ord(MovingPiece), Move.ToR, Move.ToC]; // Remove pawn from target
-    // v1.00-rc8: pawn-key bookkeeping on promotion. The pawn's ORIGIN-square
-    // term was already XORed out at the top of DoMakeMove (the unconditional
-    // "moving pawn leaves its origin" mirror). The promoted piece is not a
-    // pawn, so it contributes nothing to the pawn key. Crucially, the pawn is
-    // NEVER added to the destination square in the pawn key on a promoting
-    // move (that add lives only in the non-promotion 'else' branch below), so
-    // there is nothing to XOR out here — doing so would wrongly toggle a
-    // target-square pawn term that was never set. Net pawn-key effect of a
-    // promotion is therefore exactly "remove one pawn from the origin", which
-    // the top-of-procedure mirror already applied. Hence: no PawnHash update
-    // in this branch.
     State.Board[Move.ToR, Move.ToC] := Move.Promotion;
     State.Hash := State.Hash xor ZobristPiece[Ord(Move.Promotion), Move.ToR, Move.ToC]; // Add promoted piece
     State.HalfMoveClock := 0;
@@ -3026,11 +3069,6 @@ begin
   else
   begin
     State.Hash := State.Hash xor ZobristPiece[Ord(MovingPiece), Move.ToR, Move.ToC]; // Add moving piece to target
-    // v1.00-rc8: a non-promoting pawn arrives on its destination square —
-    // mirror that placement into the pawn key. (For a non-pawn mover this is
-    // skipped, so the pawn key is untouched, exactly as required.)
-    if (MovingPiece = wP) or (MovingPiece = bP) then
-      State.PawnHash := State.PawnHash xor ZobristPiece[Ord(MovingPiece), Move.ToR, Move.ToC];
   end;
 
   // Update king positions
@@ -3097,17 +3135,30 @@ var
 begin
   MoveCount := 0;
   GeneratePseudoLegalMoves(Pseudo, PseudoCount);
-  for i := 0 to PseudoCount - 1 do
-  begin
-    OldState := State;
-    DoMakeMove(Pseudo[i]);
-    // A move is legal if it doesn't leave OUR king in check
-    if not IsInCheck(1 - State.SideToMove) then
+  // v1.10: this loop makes and unmakes every pseudo-legal move purely to test
+  // for check, and evaluates nothing. Maintaining the NNUE accumulator across
+  // it would cost a 512-byte slot copy per candidate -- roughly 40 per call --
+  // for no benefit. Suspending the hooks is safe precisely because every
+  // iteration restores State: the accumulator is never touched, so it is still
+  // correct for the position we came in with. try/finally so an exception
+  // inside the loop cannot leave the hooks switched off for the rest of the
+  // search, which would silently freeze the accumulator.
+  NNUE_Suspend := True;
+  try
+    for i := 0 to PseudoCount - 1 do
     begin
-      Moves[MoveCount] := Pseudo[i];
-      Inc(MoveCount);
+      OldState := State;
+      DoMakeMove(Pseudo[i]);
+      // A move is legal if it doesn't leave OUR king in check
+      if not IsInCheck(1 - State.SideToMove) then
+      begin
+        Moves[MoveCount] := Pseudo[i];
+        Inc(MoveCount);
+      end;
+      State := OldState;
     end;
-    State := OldState;
+  finally
+    NNUE_Suspend := False;
   end;
 end;
 
@@ -3508,9 +3559,11 @@ Called once at program startup after InitZobrist and InitState.}
 var
   SearchRec: TSearchRec;
   ProgDir: string;
+  LoadedFiles: string;   // v2.0: names of the book files actually loaded
 begin
   BookCount := 0;
   BookLoaded := False;
+  LoadedFiles := '';
   SetLength(BookEntries, 10000);
 
   ProgDir := ExtractFilePath(ParamStr(0));
@@ -3521,7 +3574,11 @@ begin
   begin
     repeat
       if (SearchRec.Attr and faDirectory) = 0 then
+      begin
         LoadOpeningBook(ProgDir + SearchRec.Name);
+        if LoadedFiles <> '' then LoadedFiles := LoadedFiles + ', ';
+        LoadedFiles := LoadedFiles + SearchRec.Name;
+      end;
     until FindNext(SearchRec) <> 0;
     FindClose(SearchRec);
   end;
@@ -3533,13 +3590,14 @@ begin
   BookLoaded := BookCount > 0;
   if BookLoaded then
   begin
-    Log('Book: Opening book '+bookfilename+' active with ' + IntToStr(BookCount) + ' positions');
-    writeln('info Book: Opening book '+bookfilename+'  active with ' + IntToStr(BookCount) + ' positions')
+    // v2.0: name the file(s) actually loaded, not the search pattern (*.pgn)
+    Log('Book: Opening book ' + LoadedFiles + ' active with ' + IntToStr(BookCount) + ' positions');
+    writeln('info string Book: Opening book ' + LoadedFiles + ' active with ' + IntToStr(BookCount) + ' positions')
   end
   else
   begin
-    Log('Book: No .pgn opening book found — using engine search only');
-    writeln('info Book: No .pgn opening book found — using engine search only');
+    Log('Book: No opening book ' + bookfilename + ' found — using engine search only');
+    writeln('info string Book: No opening book ' + bookfilename + ' found — using engine search only');
   end;
 end;
 
@@ -3594,1474 +3652,92 @@ begin
 end;
 
 
-function SliderAttacks(sq, StartDir, EndDir: integer): QWord; {inline; fpc can not inline in inline.}
-{**Bitboard of squares reachable by a sliding piece at sq across the given
-   direction range. Direction layout matches SlideDR/SlideDC and
-   SlideDirIsPositive[]:
-     0..3 = orthogonal  (rook lines)
-     4..7 = diagonal    (bishop lines)
-   For a queen pass (0..7) the result is the union of both.
 
-   v1.00-rc6: the classical per-ray nearest-blocker scan is replaced by
-   plain magic lookups. The three direction ranges the callers actually
-   use (0..3 rook, 4..7 bishop, 0..7 queen - see the mobility loops in
-   Evaluate) map directly onto Rook/Bishop/QueenAttacksBB. The returned
-   set is mathematically identical to the pre-rc6 scan for every
-   occupancy: it contains every square the slider attacks, including
-   the first occupied square in each direction. Callers that want the
-   move-destination set should AND with NOT own_occupancy: own-piece
-   blockers are then dropped while enemy-piece blockers (capturable)
-   are retained.
 
-   v0981 (mobility evaluation). Same pattern as the slider move generator
-   (v0970), IsAttacked (v0976), and SEE's FindLVA (v0974); factored once
-   so that all four consumers switched to magics together in rc6.}
+function NNUE_Evaluate: integer;
+{**Static evaluation, side-to-move POV. v2.0: the engine's only evaluation.**
+
+The net is format 2: 768 piece-square inputs plus a side-to-move column, so it
+has learned the value of having the move itself and no tempo bonus is added.
+NNUE_EvalWhitePOV returns white-POV centipawns; the sign is flipped here for
+Black to move. Format-1 nets (no side-to-move input, fixed external tempo
+bonus) are no longer supported as of v2.0 -- unit_nnue refuses to load them.}
+var wpov: integer;
 begin
-  if StartDir >= 4 then
-    Result := BishopAttacksBB(sq, State.AllOccupied)         // 4..7
-  else if EndDir <= 3 then
-    Result := RookAttacksBB(sq, State.AllOccupied)           // 0..3
-  else
-    Result := QueenAttacksBB(sq, State.AllOccupied);         // 0..7
+  NNUE_SetPtr(State.AccPtr);
+  wpov := NNUE_EvalWhitePOV(State.SideToMove);
+  if State.SideToMove = 1 then Result := -wpov else Result := wpov;
 end;
 
-{$IFDEF TUNER}
-var  //texel tuning
-  TunerLastMG, TunerLastEG, TunerLastPhase: integer; // pre-blend white-POV sums exposed by Evaluate
-{$ENDIF}
+// =========================================================================
+// v2.0: EVAL CACHE  (Zobrist key -> static eval).  Pure speed, eval-neutral.
+//
+// Probed in EvaluatePos, the single function through which the search (main
+// search StaticEval and quiescence StandPat) obtains a static eval. The
+// diagnostic commands (nnue check / testvec) call NNUE_Evaluate or the unit
+// directly and never touch the cache.
+//
+// WHY THE KEY IS SUFFICIENT. NNUE_Evaluate reads the accumulator (a function
+// of piece placement) and State.SideToMove, nothing else: no 50-move counter,
+// no ply, no contempt, no castling/EP. State.Hash covers placement AND side to
+// move (ZobristSide, also XORed by the null move); the castling/EP bits it
+// also carries only cost a few hits. What the key does NOT cover is WHICH net
+// produced the value, so the cache is cleared whenever that can change:
+// setoption EvalFile and UseAVX2 (the kernels are bit-identical, but clearing
+// keeps any discrepancy visible instead of masked).
+//
+// ENTRY LAYOUT: one QWord per slot = upper 48 bits of the key | eval as int16.
+// The slot index is the low EVAL_CACHE_BITS of the key, so with
+// EVAL_CACHE_BITS >= 16 all 64 key bits are verified on a hit -- a false hit
+// needs two positions with the same full Zobrist key, the same exposure as
+// the TT. An all-zero (empty) slot matches only a key whose upper 48 bits are
+// zero (p = 2^-48 per probe). Evals outside int16 are not stored.
+//
+// SIZE: 2^17 x 8 B = 1 MB. Measure 16 / 17 / 18 with bench (hit rate + nps);
+// the node count must be identical for every size. Keep EVAL_CACHE_BITS >= 16.
+// =========================================================================
+const
+  EVAL_CACHE_BITS    = 17;
+  EVAL_CACHE_SIZE    = 1 shl EVAL_CACHE_BITS;
+  EVAL_CACHE_MASK    = EVAL_CACHE_SIZE - 1;
+  EVAL_CACHE_KEYBITS = not QWord($FFFF);  // upper 48 bits: verified part of the key
 
-function Evaluate: integer;
-{**Static evaluation function that scores the current position from the current player's perspective.**
-
-Positive scores favour White, negative favour Black (before the side-to-move flip
-at the end).
-
-v0960: this function now uses **tapered evaluation**. Two parallel score
-accumulators, ScoreMG (middlegame) and ScoreEG (endgame), are maintained
-throughout the function. A "phase" value is computed from non-pawn material
-(PhaseN/B/R/Q weights, MaxPhase total = 24 at game start). The final score
-is a phase-weighted interpolation:
-    Score := (ScoreMG * phase + ScoreEG * (MaxPhase - phase)) div MaxPhase
-so a fresh position weighted entirely as MG smoothly transitions to pure EG
-as material is exchanged off. This replaces v0957's binary "queens on board
-or not" switch with a continuous blend.
-
-Components include:
-
-- **Material balance**: Piece values (Pawn=100, Knight=320, Bishop=330,
-  Rook=500, Queen=900). Same in MG and EG.
-- **Piece-Square Tables**: Knight, bishop, rook, queen use one PST applied
-  to both MG and EG (positionally similar in both phases for this engine).
-  Pawn uses PawnPST_MG (MG) + PawnPST_EG (EG). King uses KingPST_MG (MG) +
-  KingPST_EG (EG) — the largest tapering effect, since king behaviour
-  changes most between phases.
-- **King safety bonuses** (king on own back rank, castled-square bonuses):
-  applied to ScoreMG only. Fade automatically in endgame via tapering.
-- **King centre-distance**: applied to ScoreEG only. Negligible in MG via
-  tapering. Reinforces the EG king PST.
-- **Pawn structure**:
-    - Passed pawns: per-relative-rank tables PassedPawnMG[0..7] /
-      PassedPawnEG[0..7] (v1.00-rc10; previously a flat bonus 1x MG /
-      2x EG). EG entries are much larger than MG - passed pawns are
-      far more valuable in endgame, where there are fewer pieces to
-      block or capture them - and both curves rise convexly with rank.
-    - Doubled pawns, isolated pawns: same in MG and EG.
-    - Backward pawns (v0963): 8 MG / 15 EG. See PASS 3 for definition.
-- **Bishop pair bonus**: same in MG and EG.
-- **Rook open/semi-open file**: same in MG and EG.
-- **Tempo bonus** (v0962a): +10 cp MG to the side to move. MG-only so
-  it fades through tapered eval — tempo can become a burden (zugzwang)
-  in deep endgames.
-
-Notes:
-The original v0957 doc string noted that evaluation refinements become
-meaningful "above 2000 Elo where search depth alone no longer compensates
-for positional blindness". v0960 reaches into evaluation explicitly because
-v0958 (LMR tuning) and v0959 (aspiration windows) both produced statistically
-neutral SPRT results — a strong signal that the engine had become evaluation-
-limited rather than search-limited.
-
-v0979: PASS 1 rewritten to iterate piece bitboards instead of scanning
-all 64 mailbox squares. Material is computed as PopCnt * value per piece
-type (12 PopCnts), phase as PopCnt of combined non-pawn non-king
-bitboards, bishop-pair counts via PopCnt. PSTs are still indexed [r, c]
-and we decode (r, c) from each bit via SquareCoords. Pawn structure
-arrays (count / front / rear) are filled in during the pawn-bitboard
-sweep. PASS 2, 3, 4 and everything below PASS 1 are unchanged.
-The mathematical result of Evaluate is identical to v0975; bench node
-counts must match.
-
-v0984: per-file integer arrays (wPawnCount / wPawnFront / wPawnRear and
-the black equivalents) are removed. The same per-file quantities are
-now derived inside the PASS 3 file loop from a single AND with
-FileMask[c]:
-    wFile  := wPawns and FileMask[c];
-    wCount := PopCnt(wFile);
-    wFront row = 7 - (BsrQWord(wFile) shr 3);    // most advanced
-    wRear  row = 7 - (BsfQWord(wFile) shr 3);    // rear-most
-The blocked-passer triple-check on bPawnFront[c-1..c+1] collapses to a
-single AND against WhitePassedMask[wFrontSq], built once by
-InitPawnMasks. Rear-support for the backward-pawn test becomes
-    (wPawns and AdjacentFileMask[c] and RanksAtOrBelow[wRearSq shr 3]) <> 0
-PASS 4 (rook open/semi-open file) tests (wPawns and FileMask[c]) = 0
-directly. PASS 1 still iterates the pawn bitboards (PSTs need the
-square decode) but no longer accumulates structure data. Pure
-refactor — bench node counts must match v0983 exactly; no Elo on its
-own. Worth doing because future pawn-structure features (candidate
-passers, connected pawns, pawn span) reduce to a single AND against a
-mask of this same shape.
-}
 var
-  r, c, ScoreMG, ScoreEG, Score: integer;
-  sq: integer;                   // v0979 — current bit position during bitboard sweep
-  gamePhase: integer;            // running phase total; clamped to MaxPhase at end of pass 1
-  WhiteBishops, BlackBishops: integer; // Bishop pair: count of bishops per side
-  pieceBB: QWord;                // v0979 — scratch bitboard for piece iteration
+  EvalCache: array[0..EVAL_CACHE_SIZE - 1] of QWord;  // zeroed at startup (global)
+  EvalCacheProbes: QWord = 0;                          // reported by bench
+  EvalCacheHits:   QWord = 0;
 
-  // v0984 — pawn bitboards captured once, reused across PASS 1 (PSTs),
-  // PASS 3 (pawn structure), and PASS 4 (rook open/semi-open file).
-  // Replaces the per-file wPawnCount / wPawnFront / wPawnRear arrays.
-  wPawns, bPawns: QWord;
-
-  // v0984 — per-file scratch values, refreshed inside the PASS 3
-  // file loop. wFile / bFile are the side's pawn bitboard intersected
-  // with FileMask[c]; wAdj / bAdj are the same intersected with
-  // AdjacentFileMask[c]. wCount / bCount are PopCnt(wFile / bFile).
-  // wFrontSq / wRearSq are the LERF bit indices of the most-advanced
-  // and rear-most white pawn on this file (via BsrQWord / BsfQWord);
-  // bFrontSq / bRearSq are the symmetric black equivalents
-  // (BsfQWord / BsrQWord, since black advances toward lower LERF
-  // ranks). (The v0984 frontRow (7 - LERF_rank) row number is retired
-  // in v1.00-rc10 - the passed-pawn term, its only consumer, now
-  // indexes by relative rank via relRank below.)
-  wFile, bFile, wAdj, bAdj: QWord;
-  wCount, bCount: integer;
-  wFrontSq, bFrontSq, wRearSq, bRearSq: integer;
-
-  // v1.00-rc10: relative rank of the front pawn on this file, used to
-  // index PassedPawnMG/PassedPawnEG. 0 = own back rank, 6 = one step
-  // from promotion. White: relRank = LERF rank of wFrontSq; black:
-  // relRank = 7 - LERF rank of bFrontSq. Replaces the old frontRow /
-  // PassedBonus pair (frontRow was the 7-LERF row number feeding the
-  // flat v0960 case table; both were used only by the passed-pawn term).
-  relRank: integer;
-
-  IsNotPassed:   boolean; // helper: true when a candidate passed pawn is in fact blocked
-  IsIsolated:  boolean; // helper: true when a pawn has no friendly pawns on adjacent files
-
-  // v1.00-rc18 step 4: passed-pawn bitboards, one per side, recomputed
-  // fresh at the top of PASS 4 (NOT read from the pawn-hash entry — the
-  // entry stores only dMG/dEG). wPassed holds every white passed pawn,
-  // bPassed every black passed pawn. Consumed by the rook-behind-passer
-  // terms in PASS 4 and available to later king-distance work.
-  wPassed, bPassed: QWord;
-  passFile: QWord;      // per-file scratch inside the passed-set builder
-  passSq:   integer;    // front-pawn square inside the builder
-
-  NotOwn: QWord;         // v0981 — mobility destination mask (= NOT own_occupancy)
-  mobCount: integer;     // v0981 — popcount of mobility set per piece
-
-  // v0963: backward pawn helper booleans (declared once here, reused per file)
-  IsBackward, StopAttacked, HasRearSupport: boolean;
-  stopSq: integer;       // v0983 — LERF bit index of the candidate backward pawn's stop square
-
-  // v1.00-rc8: pawn hash table probe. pMG/pEG accumulate the PASS 3
-  // contribution SEPARATELY from ScoreMG/ScoreEG so the (dMG, dEG) pair can be
-  // cached and, on a later hit, added back directly without re-running the
-  // per-file loop. pawnIdx is the direct-mapped table index; pawnHit records
-  // whether the probed slot's key matched (a real hit) so we only recompute
-  // on a miss and only write back on a miss.
-  pMG, pEG, pawnIdx: integer;
-  pawnHit: boolean;
-  // v1.00-rc12: king-safety attack units. atk holds the raw attack set of
-  // the piece currently being scored in PASS 5 (BEFORE the NotOwn mask —
-  // a defended zone square is still an attacked zone square). zoneHits is
-  // its intersection popcount with the enemy king zone. The zones are the
-  // king ring plus the king square. wAttackUnits/wAttackers accumulate
-  // pressure AGAINST the white king (i.e. from black pieces) and vice
-  // versa; PASS 6 converts units to a SafetyTable penalty when the
-  // attacker count reaches 2.
-  atk: QWord;
-  zoneHits: integer;
-  wKingZone, bKingZone: QWord;
-  wAttackUnits, bAttackUnits: integer;
-  wAttackers,   bAttackers:   integer;
-
-  // v1.00-rc13: threat evaluation. wPawnAtk/bPawnAtk are the squares
-  // attacked by each side's pawns, built with the same anti-wraparound
-  // shift pattern as the pawn-capture generator (shl 7 / shl 9 for
-  // white with the a-/h-file source pawns masked off, shr 7 / shr 9
-  // mirrored for black). wMinorAtk/bMinorAtk accumulate knight+bishop
-  // attack sets during PASS 5; wAttackBB/bAttackBB accumulate ALL
-  // attacks of a side (pawns + N + B + R + Q + king ring) and serve as
-  // the attacked/defended maps for the hanging test. threatBB is a
-  // per-family scratch intersection.
-  wPawnAtk, bPawnAtk:   QWord;
-  wMinorAtk, bMinorAtk: QWord;
-  wAttackBB, bAttackBB: QWord;
-  threatBB: QWord;
-  wKsq, bKsq: integer;   // rc13: king squares bound once, reused for zone + king attack map
-
-  // v1.00-rc14: knight-outpost / bad-bishop scratch. sqBB is the single-bit
-  // board of the piece currently scored in PASS 5 (used for the pawn-defended
-  // test against wPawnAtk/bPawnAtk and the colour-complex test). colorBB is
-  // the bishop's colour complex (LightSquaresBB or DarkSquaresBB); badPawns
-  // is the count of OWN pawns on that complex.
-  sqBB, colorBB: QWord;
-  badPawns: integer;
-
-  // v1.00-rc15 step 1: connected-pawn scratch. connBB iterates the pawns
-  // of the current file inside the PASS 3 loop (wFile/bFile are consumed
-  // by BsrQWord/BsfQWord probes elsewhere, so a separate iterator keeps
-  // them intact). IsSupported/IsPhalanx/IsOpposed are the three
-  // pawn-placement-only flags; connM is the SF-classical multiplier
-  // (2 + phalanx - opposed), an integer in 1..3.
-  connBB: QWord;
-  IsSupported, IsPhalanx, IsOpposed: boolean;
-  connM: integer;
-
-
-          function CentreDistance(row, col: integer): integer;
-          begin
-            Result := Min(Abs(row - 3), Abs(row - 4)) + Min(Abs(col - 3), Abs(col - 4));
-          end;
-
-          // v1.00-rc19 step 5: Chebyshev (king-move) distance between two
-          // LERF squares = max(|file diff|, |rank diff|). Range 0..7.
-          function ChebDist(sqA, sqB: integer): integer;
-          begin
-            Result := Max(Abs((sqA and 7) - (sqB and 7)),
-                          Abs((sqA shr 3) - (sqB shr 3)));
-          end;
-        function PawnShieldPenalty(kingRow, kingCol, side: integer): integer;
-          { **v0962: pawn shield penalty for one side.**
-            Returns the penalty in centipawns (always >= 0); the caller applies
-            the sign (subtract from ScoreMG for white, add to ScoreMG for black).
-
-            Theory
-            ------
-            In the middlegame a castled king relies on the three pawns directly
-            in front of it (files kingCol-1, kingCol, kingCol+1) for cover. Each
-            file is scored independently:
-              - Pawn on the rank immediately in front of king (best post):  0
-              - Pawn on the next rank up the board (advanced, weakened post): -8
-              - No friendly pawn on that file in the shield zone:           -15
-
-            Scope
-            -----
-            Only applied when the king is on its own first two ranks (row 6/7
-            for white, row 0/1 for black). A king that has wandered higher up
-            the board is already being punished by the back-rank penalty
-            handled in the surrounding code; counting shield gaps there would
-            double-penalise and could even reward absurd lines where the king
-            runs to a flank where his "shield" pawns happen to live.
-
-            Edge files
-            ----------
-            For a king in the a- or h-file the shield range (kingCol-1 .. kingCol+1)
-            spills off the board. Off-board files are simply skipped, not
-            penalised — there is no pawn to be missing on a non-existent file.
-            This deliberately gives an edge king a smaller maximum penalty,
-            matching the chess intuition that an h1 king with f/g/h pawns
-            intact is fully sheltered.
-
-            Phase
-            -----
-            The caller adds this to ScoreMG only. In the endgame the king has
-            to become active and a pawn shield is irrelevant; the tapered
-            evaluation already fades the term to zero as the phase moves to EG.
-          }
-          var
-            fileC, bestRank, advancedRank, veryAdvRank: integer;
-            pawn: TPiece;
-            shieldSum: integer;
-          begin
-            Result := 0;
-
-            // Decide ranks and pawn colour. White king shields on the rank just
-            // above (lower row number); black king shields on the rank just below.
-            if side = 0 then
-            begin
-              // White: only evaluate if king is on its own first two ranks.
-              if kingRow < 6 then Exit;
-              bestRank     := kingRow - 1;      // rank immediately ahead of white king
-              advancedRank := kingRow - 2;      // one rank further up the board
-              veryAdvRank  := kingRow - 3;      // two ranks further up (v1.00-rc20)
-              pawn := wP;
-            end
-            else
-            begin
-              // Black: mirror condition.
-              if kingRow > 1 then Exit;
-              bestRank     := kingRow + 1;
-              advancedRank := kingRow + 2;
-              veryAdvRank  := kingRow + 3;      // v1.00-rc20
-              pawn := bP;
-            end;
-
-            shieldSum := 0;
-
-            // Inspect the three files in front of the king: kingCol-1, kingCol, kingCol+1.
-            // v1.00-rc20: bucket the nearest shield pawn by advancement and add the
-            // matching ShieldMG entry (signed, <= 0). Buckets, nearest-first:
-            //   ShieldMG[0] pawn on bestRank, [1] on advancedRank, [2] on veryAdvRank,
-            //   [3] none of the above (missing from the shield zone).
-            for fileC := kingCol - 1 to kingCol + 1 do
-            begin
-              // Off-board file (king on a- or h-file): skip, not penalised.
-              if (fileC < 0) or (fileC > 7) then Continue;
-
-              if State.Board[bestRank, fileC] = pawn then
-                Inc(shieldSum, ShieldMG[0])
-              else if (advancedRank >= 0) and (advancedRank <= 7) and
-                      (State.Board[advancedRank, fileC] = pawn) then
-                Inc(shieldSum, ShieldMG[1])
-              else if (veryAdvRank >= 0) and (veryAdvRank <= 7) and
-                      (State.Board[veryAdvRank, fileC] = pawn) then
-                Inc(shieldSum, ShieldMG[2])
-              else
-                Inc(shieldSum, ShieldMG[3]);
-            end;
-
-            // Signed sum of the shield entries (<= 0 with penalty seeds). The
-            // caller ADDS this to ScoreMG for white and SUBTRACTS for black
-            // (see the v1.00-rc20 call sites), so a stored negative entry
-            // reduces the mover's score exactly as the old positive penalty did.
-            Result := shieldSum;
-          end;
+procedure ClearEvalCache;
 begin
-  // v0960: ScoreMG and ScoreEG accumulators replace the single Score of v0957.
-  // Both start at zero and are populated through the four passes below, then
-  // blended by gamePhase at the very end.
-  ScoreMG      := 0;
-  ScoreEG      := 0;
+  FillChar(EvalCache, SizeOf(EvalCache), 0);
+end;
 
-  // v0984: pawn bitboards bound once, used in PASS 1 (PST), PASS 3
-  // (structure terms), and PASS 4 (rook files). No per-file array
-  // initialisation loop — those arrays no longer exist.
-  wPawns := State.Pieces[wP];
-  bPawns := State.Pieces[bP];
+function EvaluatePos: integer; inline;
+{**The static eval as the search sees it: NNUE_Evaluate behind the eval cache.**
 
-  // =========================================================================
-  // PASS 1 (v0979): Material, PST, piece counting, and phase.
-  // Iterates piece bitboards instead of scanning all 64 mailbox squares.
-  //   Material: PopCnt(Pieces[P]) * PieceValue[P], summed per side.
-  //   Phase:    PopCnt of combined non-pawn non-king bitboards * weight.
-  //   Bishop pair: PopCnt of each side's bishop bitboard.
-  //   PSTs:     iterate each piece bitboard via BsfQWord, decode (r,c)
-  //             with SquareCoords, look up the PST. Black pieces use the
-  //             vertically mirrored [7-r, c] index, identical to v0975.
-  // v0984: the pawn loop no longer populates per-file structure arrays.
-  //        PSTs still need (r, c) decoding so the bitboard iteration
-  //        stays; the accumulator bumps just go away.
-  // No mailbox iteration in this pass. State.Board is only consulted
-  // below PASS 4 (king safety / etc.).
-  // =========================================================================
-
-  // Material balance (v0995) — split into MG and EG using PeSTO piece
-  // values. Previously a single calculation copied into ScoreEG; now
-  // each accumulator gets its own term sums. The non-pawn EG values
-  // are notably different (N: 337→281, B: 365→297, R: 477→512,
-  // Q: 1025→936) — pieces lose value in pure endgames except rooks,
-  // which gain. This is the baseline against which the v0993/v0994
-  // PeSTO PSTs were originally tuned.
-  //
-  // The Integer() casts are required: PopCnt(QWord) returns QWord,
-  // so without them the right-hand side is evaluated in unsigned
-  // 64-bit arithmetic and any intermediate that goes negative wraps
-  // to ~2^64, tripping range checks on assignment to Integer. The
-  // signs in PieceValueMG/EG (negative for black piece slots) flow
-  // through the multiply naturally, so the expression is all
-  // additions — no subtractions for the black side.
-  ScoreMG := Integer(PopCnt(wPawns))           * PieceValueMG[wP] +
-             Integer(PopCnt(State.Pieces[wN])) * PieceValueMG[wN] +
-             Integer(PopCnt(State.Pieces[wB])) * PieceValueMG[wB] +
-             Integer(PopCnt(State.Pieces[wR])) * PieceValueMG[wR] +
-             Integer(PopCnt(State.Pieces[wQ])) * PieceValueMG[wQ] +
-             Integer(PopCnt(State.Pieces[wK])) * PieceValueMG[wK] +
-             Integer(PopCnt(bPawns))           * PieceValueMG[bP] +
-             Integer(PopCnt(State.Pieces[bN])) * PieceValueMG[bN] +
-             Integer(PopCnt(State.Pieces[bB])) * PieceValueMG[bB] +
-             Integer(PopCnt(State.Pieces[bR])) * PieceValueMG[bR] +
-             Integer(PopCnt(State.Pieces[bQ])) * PieceValueMG[bQ] +
-             Integer(PopCnt(State.Pieces[bK])) * PieceValueMG[bK];
-  ScoreEG := Integer(PopCnt(wPawns))           * PieceValueEG[wP] +
-             Integer(PopCnt(State.Pieces[wN])) * PieceValueEG[wN] +
-             Integer(PopCnt(State.Pieces[wB])) * PieceValueEG[wB] +
-             Integer(PopCnt(State.Pieces[wR])) * PieceValueEG[wR] +
-             Integer(PopCnt(State.Pieces[wQ])) * PieceValueEG[wQ] +
-             Integer(PopCnt(State.Pieces[wK])) * PieceValueEG[wK] +
-             Integer(PopCnt(bPawns))           * PieceValueEG[bP] +
-             Integer(PopCnt(State.Pieces[bN])) * PieceValueEG[bN] +
-             Integer(PopCnt(State.Pieces[bB])) * PieceValueEG[bB] +
-             Integer(PopCnt(State.Pieces[bR])) * PieceValueEG[bR] +
-             Integer(PopCnt(State.Pieces[bQ])) * PieceValueEG[bQ] +
-             Integer(PopCnt(State.Pieces[bK])) * PieceValueEG[bK];
-
-
-  // Bishop pair counts (used in PASS 2).
-  WhiteBishops := PopCnt(State.Pieces[wB]);
-  BlackBishops := PopCnt(State.Pieces[bB]);
-
-  // Phase. PhaseN/B/R/Q weights sum to MaxPhase=24 at game start.
-  // Promotions can in principle push gamePhase above MaxPhase, so we
-  // clamp after the calculation.
-  gamePhase := Integer(PopCnt(State.Pieces[wN] or State.Pieces[bN])) * PhaseN +
-               Integer(PopCnt(State.Pieces[wB] or State.Pieces[bB])) * PhaseB +
-               Integer(PopCnt(State.Pieces[wR] or State.Pieces[bR])) * PhaseR +
-               Integer(PopCnt(State.Pieces[wQ] or State.Pieces[bQ])) * PhaseQ;
-  if gamePhase > MaxPhase then gamePhase := MaxPhase;
-
-  // -------------------------------------------------------------------------
-  // Piece-Square Tables — iterate each piece bitboard.
-  // -------------------------------------------------------------------------
-
-  // White pawns — PST only (v0984: structure data is no longer
-  // accumulated here; PASS 3 derives every per-file quantity from
-  // wPawns / bPawns via file-mask intersections).
-  pieceBB := wPawns;
-  while pieceBB <> 0 do
+v1.10 introduced this as the switch between the hand-crafted eval and the
+NNUE; since v2.0 the NNUE is the only evaluation. A cache hit returns exactly
+the value NNUE_Evaluate returned for that key, so node counts do not depend on
+the cache; only nps does. Callers guarantee a loaded net: 'go', bench and play
+refuse to search without one.}
+var
+  idx: integer;
+  e: QWord;
+begin
+  Inc(EvalCacheProbes);
+  idx := Integer(State.Hash and QWord(EVAL_CACHE_MASK));
+  e := EvalCache[idx];
+  if ((e xor State.Hash) and EVAL_CACHE_KEYBITS) = 0 then
   begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, PawnPST_MG   [r, c]);
-    Inc(ScoreEG, PawnPST_EG[r, c]);
+    Inc(EvalCacheHits);
+    Result := SmallInt(Word(e));
+    Exit;
   end;
 
-  // Black pawns — PST only.
-  pieceBB := bPawns;
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, PawnPST_MG   [7 - r, c]);
-    Dec(ScoreEG, PawnPST_EG[7 - r, c]);
-  end;
+  Result := NNUE_Evaluate;
 
-  // White knights.
-  pieceBB := State.Pieces[wN];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, KnightPST_MG[r, c]);
-    Inc(ScoreEG, KnightPST_EG[r, c]);
-  end;
-
-  // Black knights.
-  pieceBB := State.Pieces[bN];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, KnightPST_MG[7 - r, c]);
-    Dec(ScoreEG, KnightPST_EG[7 - r, c]);
-  end;
-
-
-  // White bishops.
-  pieceBB := State.Pieces[wB];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, BishopPST_MG[r, c]);
-    Inc(ScoreEG, BishopPST_EG[r, c]);
-  end;
-
-  // Black bishops.
-  pieceBB := State.Pieces[bB];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, BishopPST_MG[7 - r, c]);
-    Dec(ScoreEG, BishopPST_EG[7 - r, c]);
-  end;
-
-  // White rooks.
-  pieceBB := State.Pieces[wR];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, RookPST_MG[r, c]);
-    Inc(ScoreEG, RookPST_EG[r, c]);
-  end;
-
-  // Black rooks.
-  pieceBB := State.Pieces[bR];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, RookPST_MG[7 - r, c]);
-    Dec(ScoreEG, RookPST_EG[7 - r, c]);
-  end;
-
-  // White queens.
-  pieceBB := State.Pieces[wQ];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, QueenPST_MG[r, c]);
-    Inc(ScoreEG, QueenPST_EG[r, c]);
-  end;
-
-  // Black queens.
-  pieceBB := State.Pieces[bQ];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, QueenPST_MG[7 - r, c]);
-    Dec(ScoreEG, QueenPST_EG[7 - r, c]);
-  end;
-
-  // White king (MG + EG PST).
-  pieceBB := State.Pieces[wK];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Inc(ScoreMG, KingPST_MG[r, c]);
-    Inc(ScoreEG, KingPST_EG   [r, c]);
-  end;
-
-  // Black king.
-  pieceBB := State.Pieces[bK];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    Dec(ScoreMG, KingPST_MG[7 - r, c]);
-    Dec(ScoreEG, KingPST_EG   [7 - r, c]);
-  end;
-
-  // =========================================================================
-  // PASS 2: Bishop pair bonus
-  // ~30cp, roughly a third of a pawn, consistent with engine consensus
-  // =========================================================================
-  if WhiteBishops >= 2 then
-  begin
-    Inc(ScoreMG, 30);
-    Inc(ScoreEG, 30);
-  end;
-  if BlackBishops >= 2 then
-  begin
-    Dec(ScoreMG, 30);
-    Dec(ScoreEG, 30);
-  end;
-
-  // =========================================================================
-  // PASS 3: Pawn structure bonuses and penalties (per file)
-  //
-  // v0984 — per-file integer arrays gone. Each file's count / front /
-  // rear is derived once from the side's pawn bitboard intersected
-  // with FileMask[c] (PopCnt for count, BsrQWord for most-advanced,
-  // BsfQWord for rear-most). The triple-check passed-pawn test
-  // collapses to a single AND against WhitePassedMask[wFrontSq] /
-  // BlackPassedMask[bFrontSq]. The rear-support side of the backward-
-  // pawn test uses AdjacentFileMask[c] AND RanksAtOrBelow / Above of
-  // the rear-most LERF rank.
-  //
-  // Bonus values, signs, MG/EG splits, and the per-rank case
-  // statements are byte-for-byte the same as v0983; bench node counts
-  // must match v0983 exactly.
-  //
-  // v1.00-rc8: the whole pass is now cached against State.PawnHash. Its
-  // output is exactly two numbers — the middlegame and endgame contribution
-  // summed over all eight files — and those depend ONLY on the pawn
-  // placement, which the pawn key captures. So we first PROBE the pawn hash
-  // table:
-  //   * hit  -> add the cached (dMG, dEG) and skip the per-file loop entirely.
-  //   * miss -> run the loop below into the pMG/pEG accumulators (identical
-  //             arithmetic to v0983, only the accumulator names changed from
-  //             ScoreMG/ScoreEG to pMG/pEG), store the result, then fold it in.
-  // Because the cached value is the exact loop output, a hit is bit-identical
-  // to a miss — this can only change speed, never a search decision.
-  //
-  // v1.00-rc15 step 1: the connected/phalanx term joins this pass. Cache-
-  // safety verified: its three flags (supported / phalanx / opposed) are
-  // functions of wPawns/bPawns and precomputed masks ONLY — no king, no
-  // piece, no side-to-move input — so the pawn key fully determines the
-  // term and the cached (dMG, dEG) stay exact.
-  // =========================================================================
-  pawnIdx := Integer(State.PawnHash and QWord(PAWN_HASH_MASK));
-  pawnHit := PawnHashTable[pawnIdx].Valid and
-             (PawnHashTable[pawnIdx].Key = State.PawnHash);
-
-  if pawnHit then
-  begin
-    // Cache hit: apply the stored pass-3 contribution and fall through past
-    // the per-file loop (guarded by 'not pawnHit' below).
-    Inc(ScoreMG, PawnHashTable[pawnIdx].dMG);
-    Inc(ScoreEG, PawnHashTable[pawnIdx].dEG);
-  end;
-
-  pMG := 0;
-  pEG := 0;
-  if not pawnHit then
-  for c := 0 to 7 do
-  begin
-    // -------- Per-file scratch (v0984) --------
-    wFile  := wPawns and FileMask[c];
-    bFile  := bPawns and FileMask[c];
-    wCount := Integer(PopCnt(wFile));
-    bCount := Integer(PopCnt(bFile));
-    wAdj   := wPawns and AdjacentFileMask[c];
-    bAdj   := bPawns and AdjacentFileMask[c];
-
-    // Doubled pawn penalty
-    if wCount > 1 then
-    begin
-      Dec(pMG, (wCount - 1) * DoubledPawnMG);
-      Dec(pEG, (wCount - 1) * DoubledPawnEG);
-    end;
-    if bCount > 1 then
-    begin
-      Inc(pMG, (bCount - 1) * DoubledPawnMG);
-      Inc(pEG, (bCount - 1) * DoubledPawnEG);
-    end;
-
-    // Isolated pawn penalty
-    // v0984: "no own pawn on file c-1 OR c+1" reduces to wAdj = 0
-    // (AdjacentFileMask drops the off-board neighbour, so the (c>0)
-    // and (c<7) guards of v0983 are baked into the mask construction).
-    if wFile <> 0 then
-    begin
-      IsIsolated := (wAdj = 0);
-      if IsIsolated then
-      begin
-        Dec(pMG, IsolatedPawnMG);
-        Dec(pEG, IsolatedPawnEG);
-      end;
-    end;
-    if bFile <> 0 then
-    begin
-      IsIsolated := (bAdj = 0);
-      if IsIsolated then
-      begin
-        Inc(pMG, IsolatedPawnMG);
-        Inc(pEG, IsolatedPawnEG);
-      end;
-    end;
-
-    // Passed pawn bonus (white)
-    // v0984: wFrontSq = MSB of wFile = highest LERF bit = highest
-    // LERF rank = most-advanced row (lowest row number). The triple-
-    // condition row comparison on bPawnFront[c-1..c+1] reduces to
-    //   (WhitePassedMask[wFrontSq] AND bPawns) = 0.
-    // v1.00-rc10: bonus is now a per-relative-rank table lookup
-    // (PassedPawnMG / PassedPawnEG) instead of the flat v0960 case
-    // (60/40/25/15, 1x MG / 2x EG). For white the relative rank IS
-    // the LERF rank of the front pawn (wFrontSq shr 3): 1 = pawn
-    // still on its start rank, 6 = one step from promotion.
-    if wFile <> 0 then
-    begin
-      wFrontSq := Integer(BsrQWord(wFile));
-      IsNotPassed := (WhitePassedMask[wFrontSq] and bPawns) <> 0;
-      if not IsNotPassed then
-      begin
-        relRank := wFrontSq shr 3;   // LERF rank = white relative rank
-        Inc(pMG, PassedPawnMG[relRank]);
-        Inc(pEG, PassedPawnEG[relRank]);
-      end;
-    end;
-
-    // Passed pawn bonus (black)
-    // v0984: bFrontSq = LSB of bFile = lowest LERF bit = lowest LERF
-    // rank = most-advanced black row (highest row number).
-    // v1.00-rc10: same per-relative-rank table lookup as white. Black
-    // advances toward LOWER LERF ranks, so the black relative rank is
-    // the mirror: 7 - (bFrontSq shr 3). One shared table pair serves
-    // both colours symmetrically.
-    if bFile <> 0 then
-    begin
-      bFrontSq := Integer(BsfQWord(bFile));
-
-      IsNotPassed := (BlackPassedMask[bFrontSq] and wPawns) <> 0;
-      if not IsNotPassed then
-      begin
-        relRank := 7 - (bFrontSq shr 3);   // mirrored LERF rank = black relative rank
-        Dec(pMG, PassedPawnMG[relRank]);
-        Dec(pEG, PassedPawnEG[relRank]);
-      end;
-    end;
-
-    // Backward pawn penalty (v0963) — white
-    // v0983 form: HasRearSupport iff exists own pawn on adjacent file
-    // with row >= wPawnRear[c]. In LERF that means: exists own pawn on
-    // AdjacentFileMask[c] with LERF rank <= LERF rank of wRearSq.
-    // wRearSq = LSB of wFile (rear-most = highest row = lowest LERF
-    // rank on this file). RanksAtOrBelow[wRearSq shr 3] is the
-    // inclusive band of LERF ranks <= wRearSq's rank.
-    //
-    // Stop-square attack test is unchanged from v0983: PawnAttacks[1,
-    // stopSq] AND bPawns. stopSq is one LERF rank above wRearSq, i.e.
-    // wRearSq + 8 — equivalent to SquareIndex(wPawnRear[c] - 1, c).
-    if wFile <> 0 then
-    begin
-      wRearSq := Integer(BsfQWord(wFile));
-      HasRearSupport := (wAdj and RanksAtOrBelow[wRearSq shr 3]) <> 0;
-
-      stopSq := wRearSq + 8;  // one LERF rank above; = SquareIndex(rearRow - 1, c)
-      StopAttacked := (PawnAttacks[1, stopSq] and bPawns) <> 0;
-
-      IsBackward := (not HasRearSupport) and StopAttacked;
-      if IsBackward then
-      begin
-        Dec(pMG, BackwardPawnMG);
-        Dec(pEG, BackwardPawnEG);
-      end;
-    end;
-
-    // Backward pawn penalty — black
-    // v0984: symmetric. bRearSq = MSB of bFile (rear-most black =
-    // lowest row = highest LERF rank). HasRearSupport iff exists own
-    // black pawn on adjacent file with LERF rank >= bRearSq's, i.e.
-    // bAdj AND RanksAtOrAbove[bRearSq shr 3] is non-zero. Stop square
-    // is one LERF rank below bRearSq (= bRearSq - 8).
-    if bFile <> 0 then
-    begin
-      bRearSq := Integer(BsrQWord(bFile));
-
-      HasRearSupport := (bAdj and RanksAtOrAbove[bRearSq shr 3]) <> 0;
-
-      stopSq := bRearSq - 8;  // one LERF rank below; = SquareIndex(rearRow + 1, c)
-      StopAttacked := (PawnAttacks[0, stopSq] and wPawns) <> 0;
-
-      IsBackward := (not HasRearSupport) and StopAttacked;
-      if IsBackward then
-      begin
-        Inc(pMG, BackwardPawnMG);
-        Inc(pEG, BackwardPawnEG);
-      end;
-    end;
-
-    // Connected/phalanx pawns (v1.00-rc15 step 1) — white.
-    // EVERY pawn on the file is tested (unlike the passed/backward terms,
-    // which look only at the front/rear pawn). Flags, all pawn-placement
-    // only (hence pawn-hash safe):
-    //   supported: an own pawn defends sq. PawnAttacks[0, sq] is the set
-    //     of squares FROM WHICH a white pawn attacks sq (see the table
-    //     doc), so one AND against wPawns is the defender test.
-    //   phalanx:   an own pawn on an adjacent file on the SAME rank.
-    //     wAdj (= wPawns AND AdjacentFileMask[c]) AND RankMask[rank].
-    //   opposed:   an enemy pawn somewhere STRICTLY ahead on the same
-    //     file. bFile AND RanksAtOrAbove[rank+1]; a white pawn's LERF
-    //     rank is 1..6, so rank+1 never exceeds 7.
-    // Award: (2 + phalanx - opposed) * Connected??[relRank] when
-    // supported or phalanx — see the const-block comment for the theory
-    // and the linearity argument.
-    connBB := wFile;
-    while connBB <> 0 do
-    begin
-      sq := Integer(BsfQWord(connBB)); connBB := connBB and (connBB - 1);
-      relRank     := sq shr 3;                       // white relRank = LERF rank
-      IsSupported := (PawnAttacks[0, sq] and wPawns) <> 0;
-      IsPhalanx   := (wAdj and RankMask[relRank]) <> 0;
-      if IsSupported or IsPhalanx then
-      begin
-        IsOpposed := (bFile and RanksAtOrAbove[relRank + 1]) <> 0;
-        connM     := 2 + Ord(IsPhalanx) - Ord(IsOpposed);
-        Inc(pMG, connM * ConnectedMG[relRank]);
-        Inc(pEG, connM * ConnectedEG[relRank]);
-      end;
-    end;
-
-    // Connected/phalanx pawns — black mirror. Defenders come from
-    // PawnAttacks[1, sq] (squares from which a BLACK pawn attacks sq);
-    // "ahead" for black is LOWER LERF ranks, so opposed tests
-    // wFile AND RanksAtOrBelow[rank-1] (black pawn LERF rank is 1..6,
-    // so rank-1 never goes below 0). relRank is the mirror 7 - rank.
-    connBB := bFile;
-    while connBB <> 0 do
-    begin
-      sq := Integer(BsfQWord(connBB)); connBB := connBB and (connBB - 1);
-      IsSupported := (PawnAttacks[1, sq] and bPawns) <> 0;
-      IsPhalanx   := (bAdj and RankMask[sq shr 3]) <> 0;
-      if IsSupported or IsPhalanx then
-      begin
-        IsOpposed := (wFile and RanksAtOrBelow[(sq shr 3) - 1]) <> 0;
-        connM     := 2 + Ord(IsPhalanx) - Ord(IsOpposed);
-        relRank   := 7 - (sq shr 3);                 // mirrored relative rank
-        Dec(pMG, connM * ConnectedMG[relRank]);
-        Dec(pEG, connM * ConnectedEG[relRank]);
-      end;
-    end;
-  end; // for c (per-file pawn structure loop; runs only on a cache miss)
-
-  // v1.00-rc8: on a miss we have just computed the full PASS 3 contribution
-  // in (pMG, pEG). Fold it into the running score AND write it back to the
-  // pawn hash table so the next occurrence of this pawn structure is a hit.
-  // Always-overwrite replacement: last writer wins (see the table comment).
-  // On a HIT this whole block is skipped — the cached deltas were already
-  // added at the probe above and pMG/pEG stayed zero.
-  if not pawnHit then
-  begin
-    Inc(ScoreMG, pMG);
-    Inc(ScoreEG, pEG);
-    PawnHashTable[pawnIdx].Key   := State.PawnHash;
-    PawnHashTable[pawnIdx].dMG   := pMG;
-    PawnHashTable[pawnIdx].dEG   := pEG;
-    PawnHashTable[pawnIdx].Valid := True;
-  end;
-
-  // =========================================================================
-  // PASS 4 (v0980): Rook open/semi-open file bonuses
-  // Iterate rook bitboards. v0984 drops the wPawnCount / bPawnCount
-  // array lookup in favour of a direct (wPawns AND FileMask[c]) = 0
-  // test against the live bitboards. Mathematically identical to v0975.
-  // =========================================================================
-
-  // -------------------------------------------------------------------------
-  // v1.00-rc18 step 4: build the passed-pawn bitboards ONCE, fresh from the
-  // pawn placement. This deliberately does NOT read the pawn-hash entry
-  // (which stores only dMG/dEG) and is NOT itself cached — recomputing per
-  // Evaluate is cheap and keeps the pawn-hash infrastructure untouched
-  // (the plan's requested simplest correct variant). The test is the SAME
-  // one PASS 3 uses (most-advanced pawn per file vs the passed mask), so
-  // wPassed/bPassed are guaranteed consistent with the cached passed-pawn
-  // score. Exactly the front pawn of each file is tested — the one pawn
-  // PASS 3 scored — so at most one bit per file is set.
-  // -------------------------------------------------------------------------
-  wPassed := 0;
-  bPassed := 0;
-  for c := 0 to 7 do
-  begin
-    passFile := wPawns and FileMask[c];
-    if passFile <> 0 then
-    begin
-      passSq := Integer(BsrQWord(passFile));        // front (most-advanced) white pawn
-      if (WhitePassedMask[passSq] and bPawns) = 0 then
-        wPassed := wPassed or (QWord(1) shl passSq);
-    end;
-    passFile := bPawns and FileMask[c];
-    if passFile <> 0 then
-    begin
-      passSq := Integer(BsfQWord(passFile));        // front (most-advanced) black pawn
-      if (BlackPassedMask[passSq] and wPawns) = 0 then
-        bPassed := bPassed or (QWord(1) shl passSq);
-    end;
-  end;
-
-  pieceBB := State.Pieces[wR];
-  while pieceBB <> 0 do
-  begin
-    sq := Integer(BsfQWord(pieceBB)); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    if (wPawns and FileMask[c]) = 0 then
-    begin
-      if (bPawns and FileMask[c]) = 0 then
-      begin
-        Inc(ScoreMG, 25);
-        Inc(ScoreEG, 25);
-      end
-      else
-      begin
-        Inc(ScoreMG, 15);
-        Inc(ScoreEG, 15);
-      end;
-    end;
-    // v1.00-rc18 step 4 — white rook terms. Use the LERF rank (sq shr 3)
-    // directly, NOT r from SquareCoords (which is the mailbox row 7-rank).
-    // (1) Rook on relative rank 7 = white LERF rank 6, with the enemy king
-    //     on LERF rank 7 OR a black pawn still on LERF rank 6.
-    if (sq shr 3) = 6 then
-      if ((State.Pieces[bK] and RankMask[7]) <> 0) or
-         ((bPawns and RankMask[6]) <> 0) then
-      begin
-        Inc(ScoreMG, RookOn7thMG);
-        Inc(ScoreEG, RookOn7thEG);
-      end;
-    // (2) Rook behind an OWN passed pawn: same file, rook on a LOWER LERF
-    //     rank than the passer (origin side). One file holds at most one
-    //     white passer, so test this file's passer (if any) and compare.
-    if (wPassed and FileMask[c]) <> 0 then
-    begin
-      passSq := Integer(BsrQWord(wPassed and FileMask[c]));
-      if sq < passSq then
-      begin
-        Inc(ScoreMG, RookBehindOwnPassedMG);
-        Inc(ScoreEG, RookBehindOwnPassedEG);
-      end;
-    end;
-    // (3) Rook behind an ENEMY passed pawn: same file, white rook on a
-    //     HIGHER LERF rank than the black passer (between passer and its
-    //     promotion square on rank 1 — i.e. the rook is "behind" the pawn
-    //     from the pawn's advance direction).
-    if (bPassed and FileMask[c]) <> 0 then
-    begin
-      passSq := Integer(BsfQWord(bPassed and FileMask[c]));
-      if sq > passSq then
-      begin
-        Inc(ScoreMG, RookBehindEnemyPassedMG);
-        Inc(ScoreEG, RookBehindEnemyPassedEG);
-      end;
-    end;
-  end;
-
-  pieceBB := State.Pieces[bR];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    SquareCoords(sq, r, c);
-    if (bPawns and FileMask[c]) = 0 then
-    begin
-      if (wPawns and FileMask[c]) = 0 then
-      begin
-        Dec(ScoreMG, 25);
-        Dec(ScoreEG, 25);
-      end
-      else
-      begin
-        Dec(ScoreMG, 15);
-        Dec(ScoreEG, 15);
-      end;
-    end;
-    // v1.00-rc18 step 4 — black rook terms, mirror of white. Use LERF
-    // rank (sq shr 3) directly, not r from SquareCoords.
-    // (1) Rook on relative rank 7 = black LERF rank 1, with the white king
-    //     on LERF rank 0 OR a white pawn still on LERF rank 1.
-    if (sq shr 3) = 1 then
-      if ((State.Pieces[wK] and RankMask[0]) <> 0) or
-         ((wPawns and RankMask[1]) <> 0) then
-      begin
-        Dec(ScoreMG, RookOn7thMG);
-        Dec(ScoreEG, RookOn7thEG);
-      end;
-    // (2) Rook behind an OWN (black) passed pawn: same file, black rook on
-    //     a HIGHER LERF rank than the passer (origin side for black, which
-    //     advances toward lower ranks).
-    if (bPassed and FileMask[c]) <> 0 then
-    begin
-      passSq := Integer(BsfQWord(bPassed and FileMask[c]));
-      if sq > passSq then
-      begin
-        Dec(ScoreMG, RookBehindOwnPassedMG);
-        Dec(ScoreEG, RookBehindOwnPassedEG);
-      end;
-    end;
-    // (3) Rook behind an ENEMY (white) passed pawn: same file, black rook
-    //     on a LOWER LERF rank than the white passer (between passer and
-    //     its promotion square on rank 8).
-    if (wPassed and FileMask[c]) <> 0 then
-    begin
-      passSq := Integer(BsrQWord(wPassed and FileMask[c]));
-      if sq < passSq then
-      begin
-        Dec(ScoreMG, RookBehindEnemyPassedMG);
-        Dec(ScoreEG, RookBehindEnemyPassedEG);
-      end;
-    end;
-  end;
-
-  // =========================================================================
-  // PASS 5 (v0981): Mobility evaluation
-  // For each non-pawn non-king piece of each side, count the number of
-  // legal-destination squares (= attack set AND NOT own_occupancy, which
-  // includes captures of enemy pieces and quiet squares but excludes
-  // own-piece blockers). Multiply the count by a per-piece-type weight
-  // and add to ScoreMG / ScoreEG with the appropriate sign.
-  //
-  // Pieces included: knight, bishop, rook, queen.
-  // Pieces excluded:
-  //   - Pawn: pawn structure terms already cover this (PST, passed /
-  //     doubled / isolated / backward). Adding pawn "mobility" here
-  //     would double-count and be very noisy.
-  //   - King: counting king mobility rewards king activity, which is
-  //     correct in EG (already handled by KingPST_EG + EG centre
-  //     distance) but DANGEROUS in MG, where an active king is exposed.
-  //     Cleaner to leave the king out of the mobility term entirely.
-  //
-  // v1.00-rc11: the fixed per-square weight multiply is replaced by a
-  // per-piece-type table lookup indexed by the SAME mobility count:
-  //   Knight: KnightMobMG/EG[0..8]    Bishop: BishopMobMG/EG[0..13]
-  //   Rook:   RookMobMG/EG[0..14]     Queen:  QueenMobMG/EG[0..27]
-  // The tables are seeded linearly from the v0981 weights (N 4/4, B 5/5,
-  // R 2/4, Q 1/2 MG/EG; entry[m] = m * weight), so the seeded build is
-  // bit-identical to the old multiply (bench-verified); the saturation
-  // shape (0->3 moves huge, 20->23 nearly nil) is supplied by Texel
-  // tuning, not hand-imposed. Historical v0981 note kept below.
-  //
-  // Weights before rc11 (centipawn per attacked-and-not-own square):
-  //   Knight: 4 MG / 4 EG
-  //   Bishop: 5 MG / 5 EG
-  //   Rook:   2 MG / 4 EG  (rooks gain enormously in open EG positions)
-  //   Queen:  1 MG / 2 EG  (kept low — queen value is already high)
-  //
-  // These are middle-of-the-road values from the Glaurung / early-
-  // Stockfish era. They produce ~20-40cp swing total in a typical MG
-  // position — meaningful but not overwhelming. No "safe mobility"
-  // filter (excluding squares attacked by enemy pawns) yet; that would
-  // change the table INDEX, so it stays a separate later change.
-  //
-  // SliderAttacks(sq, start, end) returns the full attack set from sq
-  // across the given direction range. Bishops use (4, 7), rooks (0, 3),
-  // queens (0, 7). Knight attacks come from the precomputed
-  // KnightAttacks[sq] table.
-  // =========================================================================
-
-  // v1.00-rc12: bind the king zones and clear the attack-unit accumulators
-  // before the mobility sweep. Zone = king ring + king square. BsfQWord on
-  // the king bitboard is safe: a legal position always has both kings.
-  // v1.00-rc13: king squares are now bound to wKsq/bKsq locals so the king
-  // ring can also be folded into the side attack maps below.
-  wKsq := Integer(BsfQWord(State.Pieces[wK]));
-  bKsq := Integer(BsfQWord(State.Pieces[bK]));
-  wKingZone := KingAttacks[wKsq] or State.Pieces[wK];
-  bKingZone := KingAttacks[bKsq] or State.Pieces[bK];
-  wAttackUnits := 0;  bAttackUnits := 0;
-  wAttackers   := 0;  bAttackers   := 0;
-
-  // v1.00-rc13: pawn attack maps. White pawns attack up-left (LERF +7,
-  // a-file sources masked to prevent h-file wraparound) and up-right
-  // (LERF +9, h-file sources masked). Black is the mirror (-7 / -9).
-  // These feed both the threat terms (PASS 7) and the side attack maps.
-  wPawnAtk := ((wPawns and not FileMask[0]) shl 7) or
-              ((wPawns and not FileMask[7]) shl 9);
-  bPawnAtk := ((bPawns and not FileMask[7]) shr 7) or
-              ((bPawns and not FileMask[0]) shr 9);
-
-  // v1.00-rc13: side attack maps start from pawns + king ring; the
-  // PASS 5 loops OR in every knight/bishop/rook/queen attack set as it
-  // is computed for mobility. Minor attack maps start empty.
-  wAttackBB := wPawnAtk or KingAttacks[wKsq];
-  bAttackBB := bPawnAtk or KingAttacks[bKsq];
-  wMinorAtk := 0;
-  bMinorAtk := 0;
-
-  // -- White mobility --
-  // v1.00-rc21 step 7: SAFE MOBILITY. The destination mask now also excludes
-  // squares attacked by ENEMY pawns: a square a knight/bishop/rook/queen can
-  // technically move to but where an enemy pawn would capture it for free is
-  // not real mobility. NotOwn becomes (NOT own occupancy) AND (NOT enemy pawn
-  // attacks). bPawnAtk is complete above, before this loop. This CHANGES the
-  // mobility count (index) for every affected piece, so the old tuned
-  // mobility tables become stale seeds — acceptable, the joint retune
-  // re-fits them. Only NotOwn changes; every mobility loop body is untouched
-  // because they all read NotOwn.
-  NotOwn := (not State.Occupied[0]) and (not bPawnAtk);
-
-  pieceBB := State.Pieces[wN];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := KnightAttacks[sq];                                  // rc12: keep raw set
-    wAttackBB := wAttackBB or atk;                             // rc13: side attack map
-    wMinorAtk := wMinorAtk or atk;                             // rc13: minor threats
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Inc(ScoreMG, KnightMobMG[mobCount]);
-    Inc(ScoreEG, KnightMobEG[mobCount]);
-    // rc14/rc15: knight outpost. Three conditions, cheapest first:
-    //   (a) relative ranks 4-6 (white LERF ranks 3..5),
-    //   (b) defended by an own pawn (bit test against wPawnAtk, which
-    //       is complete before this loop runs),
-    //   (c) no black pawn can now or ever attack sq (outpost mask).
-    // rc15 step 2: the flat bonus is now OutpostMG/EG[relRank]; for white
-    // the relative rank is the LERF rank (sq shr 3), guaranteed 3..5 here.
-    if ((sq shr 3) in [3, 4, 5]) then
-    begin
-      sqBB := QWord(1) shl sq;
-      if ((wPawnAtk and sqBB) <> 0) and
-         ((bPawns and WhiteOutpostMask[sq]) = 0) then
-      begin
-        Inc(ScoreMG, OutpostMG[sq shr 3]);
-        Inc(ScoreEG, OutpostEG[sq shr 3]);
-      end;
-    end;
-    zoneHits := Integer(PopCnt(atk and bKingZone));            // rc12: king pressure
-    if zoneHits > 0 then
-    begin
-      Inc(bAttackUnits, 2 * zoneHits);
-      Inc(bAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[wB];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 4, 7);                            // rc12: keep raw set
-    wAttackBB := wAttackBB or atk;                             // rc13: side attack map
-    wMinorAtk := wMinorAtk or atk;                             // rc13: minor threats
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Inc(ScoreMG, BishopMobMG[mobCount]);
-    Inc(ScoreEG, BishopMobEG[mobCount]);
-    // rc17 step 3: bad bishop — blocked central own pawns on the bishop's
-    // colour complex. A white pawn is BLOCKED when the square in front
-    // (sq+8) is occupied by any piece; as a bitboard that is
-    // wPawns AND (AllOccupied shr 8) — shifting occupancy DOWN one rank
-    // lines each front-square occupier up with the pawn behind it. Then
-    // AND the bishop's colour complex and the central-file band, and
-    // PopCnt. Single-shot for the whole side, no per-pawn loop.
-    if ((QWord(1) shl sq) and LightSquaresBB) <> 0 then
-      colorBB := LightSquaresBB
-    else
-      colorBB := DarkSquaresBB;
-    badPawns := Integer(PopCnt(wPawns and colorBB and CentralFilesBB
-                               and (State.AllOccupied shr 8)));
-    Dec(ScoreMG, badPawns * BadBishopPawnMG);
-    Dec(ScoreEG, badPawns * BadBishopPawnEG);
-    // rc15 step 2: bishop outpost — same three conditions as the knight
-    // outpost (relative rank 4-6 = white LERF 3..5, pawn-defended, on a
-    // permanent hole via WhiteOutpostMask). Half-weight scalar pair. sqBB
-    // is reused from the bad-bishop colour test above? No — that test used
-    // (QWord(1) shl sq) inline, so bind sqBB here for the defended test.
-    if ((sq shr 3) in [3, 4, 5]) then
-    begin
-      sqBB := QWord(1) shl sq;
-      if ((wPawnAtk and sqBB) <> 0) and
-         ((bPawns and WhiteOutpostMask[sq]) = 0) then
-      begin
-        Inc(ScoreMG, BishopOutpostMG);
-        Inc(ScoreEG, BishopOutpostEG);
-      end;
-    end;
-    zoneHits := Integer(PopCnt(atk and bKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(bAttackUnits, 2 * zoneHits);
-      Inc(bAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[wR];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 0, 3);                            // rc12: keep raw set
-    wAttackBB := wAttackBB or atk;                             // rc13: side attack map
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Inc(ScoreMG, RookMobMG[mobCount]);
-    Inc(ScoreEG, RookMobEG[mobCount]);
-    zoneHits := Integer(PopCnt(atk and bKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(bAttackUnits, 3 * zoneHits);
-      Inc(bAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[wQ];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 0, 7);                            // rc12: keep raw set
-    wAttackBB := wAttackBB or atk;                             // rc13: side attack map
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Inc(ScoreMG, QueenMobMG[mobCount]);
-    Inc(ScoreEG, QueenMobEG[mobCount]);
-    zoneHits := Integer(PopCnt(atk and bKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(bAttackUnits, 5 * zoneHits);
-      Inc(bAttackers);
-    end;
-  end;
-
-  // -- Black mobility --
-  // v1.00-rc21 step 7: safe mobility, black mirror — exclude squares
-  // attacked by WHITE pawns (wPawnAtk).
-  NotOwn := (not State.Occupied[1]) and (not wPawnAtk);
-
-  pieceBB := State.Pieces[bN];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := KnightAttacks[sq];                                  // rc12: keep raw set
-    bAttackBB := bAttackBB or atk;                             // rc13: side attack map
-    bMinorAtk := bMinorAtk or atk;                             // rc13: minor threats
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Dec(ScoreMG, KnightMobMG[mobCount]);
-    Dec(ScoreEG, KnightMobEG[mobCount]);
-    // rc14/rc15: knight outpost, black mirror. Relative ranks 4-6 for black
-    // are LERF ranks 4..2; defended test against bPawnAtk; hole test
-    // against white pawns via BlackOutpostMask.
-    // rc15 step 2: index the OutpostMG/EG tables by the black relative
-    // rank 7 - (sq shr 3), the mirror of the white indexing — one shared
-    // table pair serves both sides, exactly as the passed-pawn tables do.
-    if ((sq shr 3) in [2, 3, 4]) then
-    begin
-      sqBB := QWord(1) shl sq;
-      if ((bPawnAtk and sqBB) <> 0) and
-         ((wPawns and BlackOutpostMask[sq]) = 0) then
-      begin
-        Dec(ScoreMG, OutpostMG[7 - (sq shr 3)]);
-        Dec(ScoreEG, OutpostEG[7 - (sq shr 3)]);
-      end;
-    end;
-    zoneHits := Integer(PopCnt(atk and wKingZone));            // rc12: king pressure
-    if zoneHits > 0 then
-    begin
-      Inc(wAttackUnits, 2 * zoneHits);
-      Inc(wAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[bB];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 4, 7);                            // rc12: keep raw set
-    bAttackBB := bAttackBB or atk;                             // rc13: side attack map
-    bMinorAtk := bMinorAtk or atk;                             // rc13: minor threats
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Dec(ScoreMG, BishopMobMG[mobCount]);
-    Dec(ScoreEG, BishopMobEG[mobCount]);
-    // rc17 step 3: bad bishop, black mirror. A black pawn advances toward
-    // LOWER ranks, so its front square is sq-8 and "blocked" is
-    // bPawns AND (AllOccupied shl 8) — shifting occupancy UP one rank
-    // aligns each front-square occupier with the black pawn above it.
-    // Colour complexes are side-independent; central-file band identical.
-    if ((QWord(1) shl sq) and LightSquaresBB) <> 0 then
-      colorBB := LightSquaresBB
-    else
-      colorBB := DarkSquaresBB;
-    badPawns := Integer(PopCnt(bPawns and colorBB and CentralFilesBB
-                               and (State.AllOccupied shl 8)));
-    Inc(ScoreMG, badPawns * BadBishopPawnMG);
-    Inc(ScoreEG, badPawns * BadBishopPawnEG);
-    // rc15 step 2: bishop outpost, black mirror. Same three conditions
-    // (relative rank 4-6 = black LERF 4..2, pawn-defended via bPawnAtk,
-    // permanent hole via BlackOutpostMask), index-free half-weight scalar.
-    if ((sq shr 3) in [2, 3, 4]) then
-    begin
-      sqBB := QWord(1) shl sq;
-      if ((bPawnAtk and sqBB) <> 0) and
-         ((wPawns and BlackOutpostMask[sq]) = 0) then
-      begin
-        Dec(ScoreMG, BishopOutpostMG);
-        Dec(ScoreEG, BishopOutpostEG);
-      end;
-    end;
-    zoneHits := Integer(PopCnt(atk and wKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(wAttackUnits, 2 * zoneHits);
-      Inc(wAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[bR];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 0, 3);                            // rc12: keep raw set
-    bAttackBB := bAttackBB or atk;                             // rc13: side attack map
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Dec(ScoreMG, RookMobMG[mobCount]);
-    Dec(ScoreEG, RookMobEG[mobCount]);
-    zoneHits := Integer(PopCnt(atk and wKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(wAttackUnits, 3 * zoneHits);
-      Inc(wAttackers);
-    end;
-  end;
-
-  pieceBB := State.Pieces[bQ];
-  while pieceBB <> 0 do
-  begin
-    sq := BsfQWord(pieceBB); pieceBB := pieceBB and (pieceBB - 1);
-    atk := SliderAttacks(sq, 0, 7);                            // rc12: keep raw set
-    bAttackBB := bAttackBB or atk;                             // rc13: side attack map
-    mobCount := Integer(PopCnt(atk and NotOwn));
-    Dec(ScoreMG, QueenMobMG[mobCount]);
-    Dec(ScoreEG, QueenMobEG[mobCount]);
-    zoneHits := Integer(PopCnt(atk and wKingZone));
-    if zoneHits > 0 then
-    begin
-      Inc(wAttackUnits, 5 * zoneHits);
-      Inc(wAttackers);
-    end;
-  end;
-
-  // =========================================================================
-  // PASS 6 (v1.00-rc12): King safety via attack units (MG-only).
-  //
-  // The accumulators above hold, per king, the weighted count of enemy
-  // knight/bishop/rook/queen attacks landing in the king zone (ring +
-  // king square) and the number of distinct attacking pieces. With
-  // fewer than two attackers the term is silent — the classic gate
-  // that stops the table firing on a single developed piece that
-  // merely eyes the king from across the board. The SafetyTable is
-  // convex, so a queen joining an existing attack costs the defender
-  // far more than the same queen attacking alone, which is exactly
-  // the non-additivity that the flat shield/back-rank terms cannot
-  // represent. MG-only: the tapered blend fades it in the endgame,
-  // where the EG king terms want the OPPOSITE behaviour (activity).
-  //
-  // Overlap note: the pawn shield, back-rank penalty, and castle bonus
-  // below measure the DEFENDER's structure; this pass measures the
-  // ATTACKER's piece pressure. They coexist without double-counting,
-  // though the shield penalties may deserve a downward revisit once
-  // this term is SPRT-confirmed, since an open shield now also tends
-  // to raise zoneHits indirectly.
-  // =========================================================================
-  if wAttackers >= 2 then
-    Dec(ScoreMG, SafetyTable[Min(wAttackUnits, 99)]);
-  if bAttackers >= 2 then
-    Inc(ScoreMG, SafetyTable[Min(bAttackUnits, 99)]);
-
-  // =========================================================================
-  // PASS 7 (v1.00-rc13): Threat terms.
-  //
-  // Evaluated from the attack maps completed in PASS 5. Must run after
-  // BOTH sides' loops: the hanging test needs the defender's full map.
-  //
-  //   Family 1 — pawn attacks minor / rook / queen. Counted per
-  //     attacked PIECE (a piece attacked by two pawns counts once:
-  //     the intersection is on the piece bitboard, not the pawn map).
-  //   Family 2 — minor attacks rook / queen. Same counting.
-  //   Family 3 — hanging: enemy non-king unit attacked by us and
-  //     defended by nobody. Pawns included as victims. Stacks with
-  //     families 1-2 by design (see the const-block comment).
-  //
-  // Sign convention as everywhere in Evaluate: white's threats Inc,
-  // black's threats Dec. Both phases: unlike king safety, a threat is
-  // a threat in the endgame too — if anything the EG values are
-  // larger because fewer defensive resources exist.
-  // =========================================================================
-
-  // -- White threatens black --
-  threatBB := wPawnAtk and (State.Pieces[bN] or State.Pieces[bB]);
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatMinorMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatMinorEG);
-  end;
-  threatBB := wPawnAtk and State.Pieces[bR];
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatRookMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatRookEG);
-  end;
-  threatBB := wPawnAtk and State.Pieces[bQ];
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatQueenMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatQueenEG);
-  end;
-  threatBB := wMinorAtk and State.Pieces[bR];
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * MinorThreatRookMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * MinorThreatRookEG);
-  end;
-  threatBB := wMinorAtk and State.Pieces[bQ];
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * MinorThreatQueenMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * MinorThreatQueenEG);
-  end;
-  // Hanging: black non-king units attacked by white, defended by nobody.
-  threatBB := (State.Occupied[1] and not State.Pieces[bK]) and
-              wAttackBB and not bAttackBB;
-  if threatBB <> 0 then
-  begin
-    Inc(ScoreMG, Integer(PopCnt(threatBB)) * HangingMG);
-    Inc(ScoreEG, Integer(PopCnt(threatBB)) * HangingEG);
-  end;
-
-  // -- Black threatens white --
-  threatBB := bPawnAtk and (State.Pieces[wN] or State.Pieces[wB]);
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatMinorMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatMinorEG);
-  end;
-  threatBB := bPawnAtk and State.Pieces[wR];
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatRookMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatRookEG);
-  end;
-  threatBB := bPawnAtk and State.Pieces[wQ];
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * PawnThreatQueenMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * PawnThreatQueenEG);
-  end;
-  threatBB := bMinorAtk and State.Pieces[wR];
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * MinorThreatRookMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * MinorThreatRookEG);
-  end;
-  threatBB := bMinorAtk and State.Pieces[wQ];
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * MinorThreatQueenMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * MinorThreatQueenEG);
-  end;
-  // Hanging: white non-king units attacked by black, defended by nobody.
-  threatBB := (State.Occupied[0] and not State.Pieces[wK]) and
-              bAttackBB and not wAttackBB;
-  if threatBB <> 0 then
-  begin
-    Dec(ScoreMG, Integer(PopCnt(threatBB)) * HangingMG);
-    Dec(ScoreEG, Integer(PopCnt(threatBB)) * HangingEG);
-  end;
-
-  // =========================================================================
-  // King safety (MG-only) and king centralisation (EG-only)
-  // [unchanged from v0975]
-  // =========================================================================
-  if State.WhiteKingR <= 5 then Dec(ScoreMG, (5 - State.WhiteKingR) * 25);
-  if (State.WhiteKingR = 7) and ((State.WhiteKingC = 6) or (State.WhiteKingC = 2)) then Inc(ScoreMG, 30);
-  if State.BlackKingR >= 2 then Inc(ScoreMG, (State.BlackKingR - 2) * 25);
-  if (State.BlackKingR = 0) and ((State.BlackKingC = 6) or (State.BlackKingC = 2)) then Dec(ScoreMG, 30);
-
-  // v1.00-rc20: PawnShieldPenalty now returns a SIGNED sum of ShieldMG
-  // entries (<= 0 with penalty seeds). Add it for white, subtract for
-  // black — same net effect as the old "subtract a positive penalty".
-  ScoreMG := ScoreMG + PawnShieldPenalty(State.WhiteKingR, State.WhiteKingC, 0);
-  ScoreMG := ScoreMG - PawnShieldPenalty(State.BlackKingR, State.BlackKingC, 1);
-
-  ScoreEG := ScoreEG - CentreDistance(State.WhiteKingR, State.WhiteKingC) * 10;
-  ScoreEG := ScoreEG + CentreDistance(State.BlackKingR, State.BlackKingC) * 10;
-
-  // v1.00-rc19 step 5: king / passed-pawn distance (EG only). Reuses the
-  // PASS 4 wPassed/bPassed sets and the king squares. For each WHITE
-  // passer, the black king wants to be near its front square (reward its
-  // distance) and the white king wants to be near it too (penalise white
-  // king distance). Signs mirror for black passers. wKsq/bKsq were bound
-  // in PASS 5 and are still in scope here. NOT cached in the pawn hash:
-  // this whole block runs after the cached PASS 3 delta and depends on
-  // king squares, so the pawn-key invariant is preserved.
-  passFile := wPassed;
-  while passFile <> 0 do
-  begin
-    passSq := Integer(BsfQWord(passFile)); passFile := passFile and (passFile - 1);
-    Inc(passSq, 8);   // front (advance) square; white passers never on rank 7
-    Inc(ScoreEG, KingPassedEnemyEG * ChebDist(bKsq, passSq));
-    Dec(ScoreEG, KingPassedOwnEG   * ChebDist(wKsq, passSq));
-  end;
-  passFile := bPassed;
-  while passFile <> 0 do
-  begin
-    passSq := Integer(BsfQWord(passFile)); passFile := passFile and (passFile - 1);
-    Dec(passSq, 8);   // front (advance) square for black; never on rank 0
-    Dec(ScoreEG, KingPassedEnemyEG * ChebDist(wKsq, passSq));
-    Inc(ScoreEG, KingPassedOwnEG   * ChebDist(bKsq, passSq));
-  end;
-
-  // Tempo bonus (v0962a)
-  if State.SideToMove = 0 then Inc(ScoreMG, 10) else Dec(ScoreMG, 10);
-
-  {$IFDEF TUNER}
-    TunerLastMG := ScoreMG;
-    TunerLastEG := ScoreEG;
-    TunerLastPhase := gamePhase;
-  {$ENDIF}
-
-  // Tapered blend
-  Score := (ScoreMG * gamePhase + ScoreEG * (MaxPhase - gamePhase)) div MaxPhase;
-  if State.SideToMove = 1 then Score := -Score;
-  Result := Score;
+  if (Result >= -32768) and (Result <= 32767) then
+    EvalCache[idx] := (State.Hash and EVAL_CACHE_KEYBITS) or QWord(Word(Result));
 end;
 
 
@@ -5408,23 +4084,27 @@ begin
   // Time management check
   // =========================================================================
   // Search abort checks.
-  // Wall-clock time and 'stop' command are checked every 10000 nodes to
+  // Wall-clock time and 'stop' command are checked every PollNodes nodes to
   // amortise the cost of the syscalls. The node-limit check is unconditional
   // because SearchNodes is incremented every Search call anyway, so testing
   // it costs nothing extra and ensures we stop immediately when the limit
   // is reached (important for accurate 'go nodes' compliance).
   // =========================================================================
-  // v1.00-rc3: check every ~10000 nodes. The 'stop' command is checked
+  // v1.00-rc3: check every PollNodes nodes (v2.0: ~1 ms). The 'stop' command is checked
   // whenever the counter trips, regardless of time-management mode, so
   // 'go infinite' / unlimited analysis (ExceedCeilingAbortMs = 0) still stops on
   // command. The wall-clock (hard-limit) abort is checked only when a time
   // limit is active. This is the mid-search HARD ceiling; the soft limit is
   // handled between iterations in GetBestMove and never aborts mid-search.
-  if NodeCheckCount > 10000 then
+  if NodeCheckCount >= PollNodes then   // v2.0: ~every POLL_INTERVAL_MS, see MOVE OVERHEAD
   begin
     NodeCheckCount := 0;
     if (ExceedCeilingAbortMs > 0) and
-       (GetTickCount64 - SearchStartTime > QWord(ExceedCeilingAbortMs)) then AbortSearch := True;
+       (ClockMs - SearchStartTime > QWord(ExceedCeilingAbortMs)) then
+    begin
+      AbortSearch := True;
+      CeilingHit  := True;   // v2.0: lets the go handler measure the stop latency
+    end;
     if InputReady then AbortSearch := True; // Check for 'stop' command
   end;
   if (NodeLimit > 0) and (SearchNodes >= NodeLimit) then AbortSearch := True;
@@ -5441,7 +4121,7 @@ begin
   end
   else
   begin
-    StandPat := Evaluate();
+    StandPat := EvaluatePos;   // v1.10: HCE or NNUE, see EvaluatePos
     if StandPat >= Beta then Exit(Beta);
     if StandPat > Alpha then Alpha := StandPat;
     GeneratePseudoLegalMoves(Moves, MoveCount, True); // Captures only
@@ -5851,6 +4531,8 @@ const
   // Depth 1 keeps the v0939 settings (200cp margin, search > 1 moves first)
   // because that configuration was already known to be Elo-positive.
   // =========================================================================
+  // v2.0 task 4, TEST 3: d1 250 (x1.25 for the NNUE scale) was neutral at
+  // 40/7s (+0.8 +/- 5.7, 4,910 games). Kept 200.
   FutilityMargin: array[1..2] of integer = (200, 500);   // d1: minor piece, d2: rook + pawn
   FutilityMinMoves: array[1..2] of integer = (1, 3);     // d1: > 1 searched, d2: > 3 searched
   // =========================================================================
@@ -5879,6 +4561,8 @@ const
   // Depth 1: 300cp deficit  (~minor piece)
   // Depth 2: 500cp deficit  (~rook)
   // =========================================================================
+  // v2.0 task 4, TEST 2: (380, 640) (x1.25 for the NNUE scale) was neutral
+  // at 40/7s (+1.6 +/- 6.3, 4,118 games). Kept (300, 500).
   RazorMargin: array[1..2] of integer = (300, 500);
 
   // =========================================================================
@@ -6122,6 +4806,9 @@ const
   // 120 when improving and tightens to 100 when not improving, so a node
   // whose eval has deteriorated over the last full move is pruned on a
   // smaller cushion above beta. Standard improving-conditioned RFP.
+  //
+  // v2.0 task 4, TEST 1: 150/125 (x1.25 for the NNUE scale) was neutral
+  // to slightly negative at 40/7s (-3.3 +/- 6.9, 3,369 games). Kept 120/100.
   // =========================================================================
   RFP_MARGIN_IMPROVING     = 120;
   RFP_MARGIN_NOT_IMPROVING = 100;
@@ -6248,23 +4935,27 @@ begin
   // Time management check
   // =========================================================================
   // Search abort checks.
-  // Wall-clock time and 'stop' command are checked every 10000 nodes to
+  // Wall-clock time and 'stop' command are checked every PollNodes nodes to
   // amortise the cost of the syscalls. The node-limit check is unconditional
   // because SearchNodes is incremented every Search call anyway, so testing
   // it costs nothing extra and ensures we stop immediately when the limit
   // is reached (important for accurate 'go nodes' compliance).
   // =========================================================================
-  // v1.00-rc3: check every ~10000 nodes. The 'stop' command is checked
+  // v1.00-rc3: check every PollNodes nodes (v2.0: ~1 ms). The 'stop' command is checked
   // whenever the counter trips, regardless of time-management mode, so
   // 'go infinite' / unlimited analysis (ExceedCeilingAbortMs = 0) still stops on
   // command. The wall-clock (hard-limit) abort is checked only when a time
   // limit is active. This is the mid-search HARD ceiling; the soft limit is
   // handled between iterations in GetBestMove and never aborts mid-search.
-  if NodeCheckCount > 10000 then
+  if NodeCheckCount >= PollNodes then   // v2.0: ~every POLL_INTERVAL_MS, see MOVE OVERHEAD
   begin
     NodeCheckCount := 0;
     if (ExceedCeilingAbortMs > 0) and
-       (GetTickCount64 - SearchStartTime > QWord(ExceedCeilingAbortMs)) then AbortSearch := True;
+       (ClockMs - SearchStartTime > QWord(ExceedCeilingAbortMs)) then
+    begin
+      AbortSearch := True;
+      CeilingHit  := True;   // v2.0: lets the go handler measure the stop latency
+    end;
     if InputReady then AbortSearch := True; // Check for 'stop' command
   end;
   if (NodeLimit > 0) and (SearchNodes >= NodeLimit) then AbortSearch := True;
@@ -6336,7 +5027,7 @@ begin
   // =========================================================================
   StaticEval := -30000; // Sentinel: means "not computed" (in check)
   if not InCheck then
-    StaticEval := Evaluate();
+    StaticEval := EvaluatePos;  // v1.10: HCE or NNUE, see EvaluatePos
 
   // v1.00-rc9: Improving = this side's static eval is higher than it was two
   // plies ago (ParentStaticEval is the parent node's StaticEval, which is the
@@ -7585,7 +6276,8 @@ var
   EffBudget: QWord;           // per-move budget after easy shrink / panic extend.
 begin
   // === OPENING BOOK CHECK ===
-  BookMove := GetBookMove;
+  if OwnBook then BookMove := GetBookMove   // v2.0: OwnBook false = never from book
+             else BookMove := '';
   if BookMove <> '' then
   begin
     InfoLine := 'info Found something in the opening book';
@@ -7602,7 +6294,17 @@ begin
   if MoveCount = 1 then Exit(MoveToStr(Moves[0]));
   ShuffleMoves(Moves, MoveCount);
 
-  StartTime := GetTickCount64;
+  // v1.10: rebuild the accumulator once per search. Two reasons, both cheap
+  // at one full recompute against millions of nodes:
+  //   1. It bounds State.AccPtr. Game moves applied at the root through
+  //      ApplyUCIMove push a slot each and never pop, so without this the
+  //      index would climb for the whole game.
+  //   2. It resynchronises against any drift, so a latent incremental bug
+  //      cannot accumulate across moves -- it would be confined to one
+  //      search and show up in `nnue check` rather than as lost games.
+  NNUE_FullRefresh;
+
+  StartTime := ClockMs;
   SearchStartTime := StartTime;
 
   // =========================================================================
@@ -7687,7 +6389,7 @@ begin
       end;
     end;
 
-    DepthStartTime := GetTickCount64;
+    DepthStartTime := ClockMs;
 
     // =====================================================================
     // v0996 aspiration window setup. At shallow depths or when
@@ -7766,7 +6468,7 @@ begin
           // diagnostic record makes it clear whether the abort fell in
           // an aspiration retry or the first attempt.
           // =============================================================
-          CurrentTime := GetTickCount64;
+          CurrentTime := ClockMs;
           TimeElapsed := CurrentTime - StartTime;
 
           if (PartialMoveCount > 0) and
@@ -7918,9 +6620,16 @@ begin
     BestMoveAtDepth    := MoveToStr(Moves[BestIdx]);
     Result             := BestMoveAtDepth;
 
-    CurrentTime      := GetTickCount64;
+    CurrentTime      := ClockMs;
     TimeForThisDepth := CurrentTime - DepthStartTime;
     TimeElapsed      := CurrentTime - StartTime;
+
+    // v2.0: poll the clock about every POLL_INTERVAL_MS, whatever the CPU
+    // speed: nodes per ms of this depth sets the poll interval for the rest
+    // of this search and the next one. Node counts are unaffected.
+    if TimeForThisDepth >= POLL_CALIB_MIN_MS then
+      PollNodes := EnsureRange(Integer((SearchNodes * POLL_INTERVAL_MS) div Int64(TimeForThisDepth)),
+                               POLL_NODES_MIN, POLL_NODES_MAX);
 
     InfoLine := 'info depth ' + IntToStr(CurrentDepth) +
                 ' seldepth ' + IntToStr(SelDepth) +
@@ -8020,13 +6729,18 @@ begin
     end;
   end;
 
+  templog := templog + 'SUMMARY used ' + IntToStr(ClockMs - StartTime) +
+    'ms alloc ' + IntToStr(AllocatedTimeMs) +
+    ' ceiling ' + IntToStr(ExceedCeilingAbortMs) +
+    ' best ' + BestMoveAtDepth + #10;
+
   BufferedLog(templog);
   Flushlog;
 
   if (AllocatedTimeMs > 0) and (AllocatedTimeMs < TM_UNLIMITED_MS) then //for calculate average time move
     begin
       Inc(TMSumAllocMs, QWord(AllocatedTimeMs));
-      Inc(TMSumUsedMs, GetTickCount64 - StartTime);
+      Inc(TMSumUsedMs, ClockMs - StartTime);
     end;
 
   Result := BestMoveAtDepth;
@@ -8191,9 +6905,6 @@ begin
   FillChar(History, SizeOf(History), 0);
 
   RebuildBitboardsFromBoard; // v0967: derive bitboards from the FEN-parsed mailbox
-  // v1.00-rc8: pawn key from scratch, AFTER the bitboards are rebuilt
-  // (ComputePawnHash reads State.Pieces[wP]/[bP]).
-  State.PawnHash := ComputePawnHash;
 end;
 
 
@@ -8289,6 +7000,9 @@ const
     '8/8/8/4k3/8/4K3/4P3/8 w - - 0 1',                                      // 15. K+P opposition endgame
     'r2q1rk1/pp2ppbp/2n2np1/2pp4/3P1B2/2PBPN2/PP1N1PPP/R2Q1RK1 b - - 0 9'   // 16. King's Indian Attack
   );
+const
+  BENCH_EXCL = 9;   // v2.0: 0-based index of position 10, a forced mate that
+                    // dominates the totals; reported separately (nps excl.)
 var
   i: integer;
   TotalNodes: int64;
@@ -8298,9 +7012,19 @@ var
   BestMove: string;
   SavedSeed: cardinal;
   SavedState: TGameState;
+  PosStart: QWord;          // v2.0: per-position timing
+  PosMs, ExclMs: int64;
+  ExclNodes: int64;
+  NpsExcl: int64;
 begin
   // Snapshot global state we will modify, so the engine can resume the
   // previous game/position normally after bench completes.
+  if not NNUE_Available then   // v2.0: no HCE to fall back on
+  begin
+    WriteLn('bench: no net loaded (', EvalFileName, ') -- load one first:');
+    WriteLn('  setoption name EvalFile value <absolute path of the .nnue>');
+    Exit;
+  end;
   SavedSeed  := RandSeed;
   SavedState := State;
 
@@ -8309,7 +7033,11 @@ begin
   Flush(Output);
 
   TotalNodes := 0;
-  StartTime  := GetTickCount64;
+  ExclNodes  := 0;
+  ExclMs     := 0;
+  EvalCacheProbes := 0;
+  EvalCacheHits   := 0;
+  StartTime  := ClockMs;
 
   for i := 0 to High(BENCH_FENS) do
   begin
@@ -8319,8 +7047,8 @@ begin
     InitState;
     ParseFEN(BENCH_FENS[i]);
     ClearTT;
-    ClearPawnTT;  // v1.00-rc8: per-position isolation for the pawn cache too,
-                  // so bench node counts stay deterministic across positions.
+    ClearEvalCache; // v2.0: same isolation for the eval cache (node counts do
+                    // not depend on it; this keeps per-position timing fair).
     FillChar(Killers, SizeOf(Killers), 0);
     FillChar(History, SizeOf(History), 0);
 
@@ -8341,31 +7069,52 @@ begin
     NodeCheckCount  := 0;
     AbortSearch     := False;
     ExceedCeilingAbortMs := 0;
-    SearchStartTime := GetTickCount64;
+    SearchStartTime := ClockMs;
 
     // Generous AllocatedTimeMs (well within int32 even after *85). The
     // depth limit is the real stopping condition; time is effectively
     // disabled.
+    PosStart := ClockMs;
     BestMove := GetBestMove(MaxInt div 100, BenchDepth);
+    PosMs := Int64(ClockMs - PosStart);
 
     TotalNodes := TotalNodes + SearchNodes;
+    if i <> BENCH_EXCL then
+    begin
+      ExclNodes := ExclNodes + SearchNodes;
+      ExclMs    := ExclMs + PosMs;
+    end;
 
     WriteLn('Position ', i+1:3, '/', Length(BENCH_FENS),
             '  bestmove ', BestMove,
-            '  nodes ', SearchNodes);
+            '  nodes ', SearchNodes,
+            '  ms ', PosMs);
     Flush(Output);
   end;
 
-  ElapsedMs := Int64(GetTickCount64 - StartTime);
+  ElapsedMs := Int64(ClockMs - StartTime);
   if ElapsedMs > 0 then
     NodesPerSec := (TotalNodes * 1000) div ElapsedMs
   else
     NodesPerSec := 0;
 
+  if ExclMs > 0 then
+    NpsExcl := (ExclNodes * 1000) div ExclMs
+  else
+    NpsExcl := 0;
+
   WriteLn('===========================');
   WriteLn('Time (ms)    : ', ElapsedMs);
   WriteLn('Nodes total  : ', TotalNodes);
   WriteLn('Nodes/second : ', NodesPerSec);
+  WriteLn('Excluding position ', BENCH_EXCL + 1, ':');
+  WriteLn('  Time (ms)    : ', ExclMs);
+  WriteLn('  Nodes        : ', ExclNodes);
+  WriteLn('  Nodes/second : ', NpsExcl);
+  if EvalCacheProbes > 0 then
+    WriteLn('Eval cache   : ', EvalCacheHits, ' / ', EvalCacheProbes, ' hits (',
+            (EvalCacheHits * 100.0 / EvalCacheProbes) : 0 : 1, ' %), ',
+            EVAL_CACHE_SIZE, ' entries');
   WriteLn('===========================');
   Flush(Output);
 
@@ -8458,6 +7207,20 @@ begin
 end;
 
 
+// =========================================================================
+// v1.10: NNUE validation and data-generation commands.
+//
+// Included here rather than earlier because they depend on almost everything
+// above: Evaluate, NNUE_Evaluate, NNUE_FullRefresh, GenerateLegalMoves,
+// DoMakeMove, InitState, SEE, IsInCheck, ComputeHash and ComputePawnHash.
+// Included before the UCI dispatch loop, which is their only caller.
+// =========================================================================
+{$I pasknight_nnue_cmds.inc}
+{$IFDEF NNUE_GENDATA}
+{$I pasknight_nnue_gendata.inc}
+{$ENDIF}
+
+
 procedure PlayMode;
 {**Simple interactive human-vs-engine loop, activated by the non-UCI command
 "play". Reuses the existing engine primitives (InitState, GenerateLegalMoves,
@@ -8548,6 +7311,12 @@ var
   end;
 
 begin
+  if not NNUE_Available then   // v2.0: the NNUE is the only evaluation
+  begin
+    WriteLn('play: no net loaded (', EvalFileName, ') -- load one first:');
+    WriteLn('  setoption name EvalFile value <absolute path of the .nnue>');
+    Exit;
+  end;
   PlayDepth  := 6;   // sensible default, overridden below for human play
   MoveTimeMs := 250; // sensible default, overridden below for self-play
 
@@ -8595,11 +7364,11 @@ begin
   // --- Set up a fresh game ---
   InitState;
   ClearTT;
-  ClearPawnTT;  // v1.00-rc8: keep the pawn cache in sync with the TT reset
   FillChar(Killers, SizeOf(Killers), 0);
   FillChar(History, SizeOf(History), 0);
 
   // Load / disable the opening book for this game.
+  OwnBook := UseBook;   // v2.0: the play-mode choice is the OwnBook setting
   if UseBook then
   begin
     if not BookInitialized then
@@ -8693,27 +7462,132 @@ begin
   Writeln('go perftauto  - Node count for several programmed positions at fixed depth 5. Reports any error');
   Writeln('stop          - Stop search and return best move. Example: stop');
   Writeln('quit          - Exit engine. Example: quit');
+  writeln;
+  Writeln('=== NNUE (v2.0.0) ===');
+  Writeln('The net is the only evaluation (v2.0: the hand-crafted eval was removed).');
+  Writeln('It is EMBEDDED in the executable (v2.0.0alpha3): no .nnue file is needed.');
+  Writeln('A .nnue next to the exe (also pasknight.nnue) is only loaded when EvalFile');
+  Writeln('names it. Without a net the engine will not search.');
+  if NNUE_Available then
+    Writeln('In use now: ', ActiveNetDesc)
+  else
+    Writeln('In use now: NO NET LOADED (', EvalFileName, ' failed to load)');
+  writeln;
+  Writeln('setoption name EvalFile value <file>   - load an external net instead (give an');
+  Writeln('                       absolute path). If it fails to load, NO net is loaded');
+  Writeln('                       and the engine will not search (go -> bestmove 0000).');
+  Writeln('setoption name EvalFile value <embedded> - back to the embedded net (an empty');
+  Writeln('                       value does the same)');
+  writeln;
+  Writeln('nnue embed <file.nnue> <out.inc> [name]');
+  Writeln('                     - checks a net exactly as the loader does and writes it');
+  Writeln('                       as a Pascal include. Embed a new net: write the');
+  Writeln('                       project''s pasknight_net.inc, then rebuild BOTH build');
+  Writeln('                       modes. name defaults to the file name (nnue10.nnue ->');
+  Writeln('                       nnue10); "pasknight" is refused. Quote paths that');
+  Writeln('                       contain spaces. The active net is not changed.');
+  Writeln('                       Example: nnue embed C:\PasKnight2.fpc\nnue10.nnue');
+  Writeln('                                C:\PasKnight2.fpc\pasknight_net.inc');
+  Writeln('nnue stats           - net in use, accumulator slot, overflow counters, and');
+  Writeln('                       pushes/evaluations since the last call (then resets)');
+  Writeln('nnue check [plies]   - plays random legal moves, comparing the incrementally');
+  Writeln('                       maintained accumulator against a full recompute at');
+  Writeln('                       every ply. Reports how many castles, promotions and');
+  Writeln('                       en passants were actually exercised. Must be exact.');
+  Writeln('nnue testvec <file>  - checks the Pascal integer forward pass against vectors');
+  Writeln('                       from export_nnue.py, layer by layer. Run this after');
+  Writeln('                       ANY change to pasknight_unit_nnue.pas.');
+  {$IFDEF NNUE_GENDATA}
+  Writeln('gendata selfplay ... - generate training data (NNUE_GENDATA builds only)');
+  {$ENDIF}
+  writeln;
+  Writeln('=== Compile switches (see pasknight_unit_nnue.pas) ===');
+  Writeln('NNUE_SSE2       - PMADDWD forward pass and PADDW accumulator. Auto-enabled');
+  Writeln('                  on x86-64; ~2.4x over scalar. Comment out to fall back.');
+  Writeln('NNUE_GENDATA    - adds the gendata command (self-play training data).');
+  Writeln('NNUE_FLOAT_REF  - maintains a parallel Double accumulator and exposes the');
+  Writeln('                  float forward pass, isolating quantization error from');
+  Writeln('                  everything else. SEVERAL TIMES SLOWER: never benchmark or');
+  Writeln('                  play matches with it except against another such build.');
+  Writeln('NNUE_DEBUG_ACC  - tracks peak accumulator magnitude against the int16 limit.');
+  Writeln('                  Costs 256 comparisons per evaluation. Essential if the');
+  Writeln('                  feature set or accumulator design is ever changed.');
 end;
 
 //=========================================================
 
 
-//texel tuning
-{$IFDEF TUNER}
-{$I pasknight_texel_tuner.pas}
-{$ENDIF}
-
 begin
   writeln('PasKnight UCI compatible chess engine ' + version +
     '. Log text file will be written at same location as executable. Waiting for uci commands. Type display for chess board. Type help for help. Type play for basic interface.');
+
+  {$IFDEF NNUE_GENDATA}
+
+  writeln;
+  writeln('*** NNUE_GENDATA build: training-data generator, Hash 8 MB by default. ***');
+  writeln;
+  writeln('  gendata selfplay <count> <file> [nodes] [seed]');
+  writeln('      v2.0 GAME-RESULT data. Plays complete games with the engine''s');
+  writeln('      own search and records each position''s search score AND the');
+  writeln('      eventual result. nodes defaults to 1000 (per deepening');
+  writeln('      iteration, as in `go nodes`), seed to 0 = seed from the clock.');
+  writeln;
+  writeln('      GIVE EVERY PARALLEL INSTANCE A DISTINCT SEED. Randomize seeds');
+  writeln('      from the clock; six processes launched together get the same');
+  writeln('      seed and play the SAME games. Six files, a healthy-looking');
+  writeln('      loss curve, one sixth of the data you think you have.');
+  writeln;
+  writeln('  Labels come from the loaded net (EvalFile); the generator refuses to');
+  writeln('      run without one. Hash stays small because it clears the TT between');
+  writeln('      games, so a 256 MB table costs real time and buys nothing at');
+  writeln('      these node counts.');
+  writeln;
+  Flush(Output);
+  {$ENDIF}
+
 
   Randomize;// Initialize random with deterministic seed for Zobrist
   InitZobrist;
   InitAttackTables;  // v0967: build precomputed pawn/knight/king attack tables
   InitMagicTables;   // v1.00-rc6: build + verify the plain-magic slider tables
-  InitPawnMasks;     // v0984: build precomputed pawn-structure file masks
-  InitPawnHash;      // v1.00-rc8: allocate + clear the pawn hash table
   InitState;
+
+  // v1.10: load the NNUE weights at startup so the engine is ready to play
+  // without the GUI having to send setoption. v2.0: the net is the only
+  // evaluation, so a failure is reported loudly and the engine refuses to
+  // search until a net loads (setoption name EvalFile).
+  // v2.0.0alpha3: the startup net is the one EMBEDDED in the executable --
+  // no file lookup, so the working directory no longer matters. It goes
+  // through the same checks as an external file (NNUE_CheckBuffer).
+  if NNUE_LoadEmbedded then
+  begin
+    NNUE_FullRefresh;
+    log('NNUE loaded: ' + NNUE_EmbeddedDesc);
+
+    if NNUE_HasAVX2 then
+    begin
+      WriteLn('info string NNUE: AVX2 kernels');
+      log('NNUE: AVX2 kernels');
+    end
+    else
+    begin
+      WriteLn('info string NNUE: SSE2 kernels');
+      log('NNUE: SSE2 kernels');
+    end;
+  end
+  else
+  begin
+    // Only possible with a damaged pasknight_net.inc: 'nnue embed' writes
+    // only nets that passed the same checks. The reason was printed above.
+    WriteLn('info string NNUE: the embedded net (', NNUE_EmbeddedName,
+            ') failed its checks -- rebuild with a pasknight_net.inc written by nnue embed');
+    log('info string NNUE: the embedded net (' + NNUE_EmbeddedName + ') failed its checks');
+    WriteLn('info string NNUE: NO NET LOADED -- the engine will not search until',
+            ' one loads (setoption name EvalFile value <absolute path>).');
+    log('info string NNUE: NO NET LOADED -- the engine will not search.');
+    Flush(Output);
+  end;
+
   BookInitialized:=false;
   // v1.00-rc3 instrumentation: start the per-game phase accumulators clean.
 //  StatsGameIndex := 1;
@@ -8726,16 +7600,15 @@ begin
   // The GUI may issue 'setoption name Hash value N' later, which calls
   // ResizeHash again with the requested size. Allocating at startup means
   // even a GUI that never sends setoption Hash gets a working TT.
-  ResizeHash(HASH_DEFAULT_MB);
-  AllocatedTimems := 20000; // Default 20 seconds if GUI sends no time
-  SearchDepth := 10;
-  display:=false;
 
-  //texel tuning
-  {$IFDEF TUNER}
-  RunTexelTuner;
-  Halt(0);
+  {$IFDEF NNUE_GENDATA}
+  ResizeHash(8);
+  {$ELSE}
+  ResizeHash(HASH_DEFAULT_MB);
   {$ENDIF}
+
+  AllocatedTimems := 20000; // Default 20 seconds if GUI sends no time
+  display:=false;
 
   try
     while True do
@@ -8750,17 +7623,26 @@ begin
         WriteLn('id author Han Kleijn (Country: NL)');
         WriteLn('option name Hash type spin default ' + IntToStr(HASH_DEFAULT_MB) +
                 ' min ' + IntToStr(HASH_MIN_MB) + ' max ' + IntToStr(HASH_MAX_MB));
-        WriteLn('option name depth type spin default 50 min 1 max 99');
         WriteLn('option name OwnBook type check default true');
         WriteLn('option name LogFile type check default false');
         // Advertise the custom opening book path option to the GUI
         WriteLn('option name BookFile type string default *.pgn');
+        // v2.0.0alpha3: the default is the net embedded in the executable;
+        // a path loads an external net instead.
+        WriteLn('option name EvalFile type string default ', EVALFILE_EMBEDDED);
+        writeln('option name UseAVX2 type check default true');
 
         // Advertise non-default capabilities. UCI has no formal way to do
         // this, but most GUIs display info string lines, so curious users
         // (and developers debugging engine-GUI interactions) can see them.
         WriteLn('info string Supported go parameters: depth movetime nodes infinite wtime btime winc binc movestogo');
-        WriteLn('info string Non-UCI commands: bench [depth]');
+        WriteLn('info string Non-UCI commands: bench [depth], nnue check|testvec|stats|embed');
+        // v2.0.0alpha3: name the active net in the uci reply too.
+        if NNUE_Available then
+          WriteLn('info string NNUE: ', ActiveNetDesc)
+        else
+          WriteLn('info string NNUE: NO NET LOADED (', EvalFileName,
+                  ') -- the engine will not search');
 
         WriteLn('uciok');
       end
@@ -8770,12 +7652,22 @@ begin
       begin
         // Load the opening book on the first isready call.
         // Arena waits for readyok, so it won't timeout here.
-        if BookInitialized=false then
+        if OwnBook and (BookInitialized=false) then  // v2.0: not with OwnBook false
         begin
           writeln('info loading open book ......');
           LoadAllOpeningBooks;
           BookInitialized := True;
         end;
+
+        if NNUE_Available then
+          EvalMsg := 'eval: NNUE ' + ActiveNetDesc
+        else
+          EvalMsg := 'eval: NO NET LOADED (' + EvalFileName +
+                     ', working directory ' + GetCurrentDir +
+                     ') -- the engine will not search';
+        WriteLn('info string ', EvalMsg);
+        Log(EvalMsg);
+
         WriteLn('readyok');
         Flush(Output);
       end
@@ -8798,14 +7690,23 @@ begin
         begin
           ParamValue := '';
           ParamName := lowercase(Trim(ParamName));
+          // v2.0.0alpha3: 'setoption name EvalFile value' with an EMPTY value
+          // arrives trimmed, so ' value ' is not found and the name would
+          // read 'evalfile value'. Only for EvalFile, where an empty value
+          // means the embedded net; other options keep their old handling.
+          if ParamName = 'evalfile value' then ParamName := 'evalfile';
         end;
         if lowercase(ParamName) = 'ownbook' then
         begin
-          if ParamValue = 'false' then
+          // v2.0: a real switch (see OwnBook at the book globals).
+          OwnBook := (ParamValue = 'true');
+          if OwnBook then
           begin
-            BookLoaded := true;//set bookloaded:=true, book will not be loaded after this
-            bookcount:=0;//if already loaded stop using it.
-          end;
+            if BookCount = 0 then
+              BookInitialized := False;  // (re)load at the next isready / go
+          end
+          else
+            BookCount := 0;              // stop using an already loaded book
         end;
         if lowercase(ParamName) = 'logfile' then
         begin
@@ -8828,10 +7729,24 @@ begin
             BookInitialized := false;     // Force re-loading with the new file path on next isready/go
           end;
         end;
-        if lowercase(ParamName) = 'depth' then
+        if lowercase(ParamName) = 'useavx2' then
         begin
-          SearchDepth := max(1,min(20,StrToInt(ParamValue)));
+          NNUE_HasAVX2 := (ParamValue = 'true') and NNUE_CPUHasAVX2;
+          ClearEvalCache;  // v2.0: see the eval cache header
+          if NNUE_HasAVX2 then
+            WriteLn('info string NNUE: AVX2 kernels')
+          else if NNUE_CPUHasAVX2 then
+            WriteLn('info string NNUE: SSE2 kernels (AVX2 available but switched off)')
+          else
+            WriteLn('info string NNUE: SSE2 kernels (no AVX2 on this CPU)');
+          Flush(Output);
         end;
+        // v2.0.0beta1: the 'depth' option is removed. A depth limit is given
+        // per search with 'go depth N'. The option capped 'go movetime' at
+        // depth 10 by default, was overwritten by every 'go depth', was
+        // clamped to 20 while advertising 99, and a non-numeric value ended
+        // the engine (StrToInt). A stored GUI 'depth' option now gets the
+        // unknown-option reply below.
         // v0997: runtime hash resize.
         // The GUI typically sends this once, between 'uci' and 'ucinewgame'.
         // ResizeHash silently clamps out-of-range values; StrToIntDef returns
@@ -8841,6 +7756,59 @@ begin
         begin
           ResizeHash(StrToIntDef(ParamValue, HASH_DEFAULT_MB));
         end;
+        // v1.10: NNUE option. Ends in a NNUE_FullRefresh, because swapping the
+        // weight file invalidates whatever the accumulator currently holds.
+        // v2.0.0alpha3: an empty value or '<embedded>' selects the embedded
+        // net; anything else is a path. A failed external load leaves NO net
+        // loaded -- deliberately no fallback to the embedded net, so a wrong
+        // path in a match or gendata setup stops the engine ('bestmove 0000')
+        // instead of quietly testing the embedded net.
+        if lowercase(ParamName) = 'evalfile' then
+        begin
+          if (ParamValue = '') or (ParamValue = EVALFILE_EMBEDDED) then
+          begin
+            EvalFileName := EVALFILE_EMBEDDED;
+            if not NNUE_LoadEmbedded then
+            begin
+              WriteLn('info string NNUE: the embedded net (', NNUE_EmbeddedName,
+                      ') failed its checks');
+              log('info string NNUE: the embedded net (' + NNUE_EmbeddedName + ') failed its checks');
+              WriteLn('info string NNUE: NO NET LOADED -- the engine will not search.');
+              log('info string NNUE: NO NET LOADED -- the engine will not search.');
+            end;
+          end
+          else
+          begin
+            EvalFileName := ParamValue;
+            if not NNUE_Load(EvalFileName) then
+            begin
+              WriteLn('info string NNUE: could not load "', EvalFileName,
+                      '" from working directory ', GetCurrentDir);
+              log('info string NNUE: could not load "'+ EvalFileName+'" from working directory '+ GetCurrentDir);
+              WriteLn('info string NNUE: NO NET LOADED -- the engine will not search',
+                      ' (setoption name EvalFile value ', EVALFILE_EMBEDDED,
+                      ' returns to the embedded net).');
+              log('info string NNUE: NO NET LOADED -- the engine will not search.');
+            end;
+          end;
+          NNUE_FullRefresh;
+          ClearEvalCache;  // v2.0: new (or no) net -- cached values are stale
+        end;
+        // v2.0: answer an option this engine does not have -- e.g. UseNNUE,
+        // removed with the HCE, still sent by a stored GUI configuration --
+        // instead of ignoring it silently. Keep this list in step with the
+        // handlers above and the 'option name' lines of the 'uci' reply.
+        if (ParamName <> '') and
+           (lowercase(ParamName) <> 'ownbook') and
+           (lowercase(ParamName) <> 'logfile') and
+           (lowercase(ParamName) <> 'bookfile') and
+           (lowercase(ParamName) <> 'useavx2') and
+           (lowercase(ParamName) <> 'hash') and
+           (lowercase(ParamName) <> 'evalfile') then
+        begin
+          WriteLn('info string unknown option "', ParamName, '" (ignored)');
+          Log('info string unknown option "' + ParamName + '" (ignored)');
+        end;
       end
 
       else if InputLine = 'ucinewgame' then
@@ -8849,7 +7817,8 @@ begin
         TMSumAllocMs:=0;   // sum of AllocatedTimeMs over past moves this game
         TMSumUsedMs:= 0;   // sum of actually elapsed search time
         ClearTT; // Clear Transposition Table on new game
-        ClearPawnTT; // v1.00-rc8: clear pawn hash table on new game too
+        ClearEvalCache; // v2.0: and the eval cache
+        LagPrevValid := False; // v2.0: no overhead sample across games
         FillChar(Killers, SizeOf(Killers), 0); // Clear killer moves
         FillChar(History, SizeOf(History), 0);
         if display then DisplayBoardSimple;//display board in ascii for debugging
@@ -8912,7 +7881,10 @@ begin
 
       else if Copy(InputLine, 1, 2) = 'go' then
       begin
-        if BookInitialized=false then //should already be loaded after uci command
+        GoTick     := ClockMs;   // v2.0: own time of this move starts here
+        ClockGo    := False;
+        CeilingHit := False;
+        if OwnBook and (BookInitialized=false) then //should already be loaded after uci command; v2.0: not with OwnBook false
         begin
           LoadAllOpeningBooks;
           BookInitialized := True;
@@ -8925,13 +7897,10 @@ begin
           AllocatedTimeMs := 0;
           // Default depth ceiling for time-controlled play. Time abort decides
           // when to stop, so the depth cap only matters as a safety bound.
-          // Setting this to a high value means the 'depth' UCI option no
-          // longer artificially caps normal play; that option now only takes
-          // effect via an explicit 'go depth N' command from the GUI.
-          // Without this, a GUI that sends 'setoption name depth value 6'
-          // (which is the default value the engine advertises) would limit
-          // the engine to depth 6 in every time-controlled game, costing
-          // ~200 Elo of playing strength.
+          // Only an explicit 'go depth N' sets a lower limit. (Before
+          // v2.0.0beta1 a 'depth' UCI option existed; a GUI that sent its
+          // advertised value 6 once limited every time-controlled game to
+          // depth 6, ~200 Elo. The option is removed, see setoption.)
           HardDepthLimit := 50;
           NodeLimit        := 0;  // Reset; only the 'nodes' branch sets a non-zero limit
           if SL.IndexOf('infinite') <> -1 then
@@ -8941,14 +7910,13 @@ begin
             // v1.00-rc3: no time management. TM_UNLIMITED_MS takes the no-TM
             // path in GetBestMove (both limits 0); the search runs to the
             // depth 50 ceiling or until a 'stop' command, which is checked
-            // every ~10000 nodes regardless of time-management mode.
+            // every PollNodes nodes (~1 ms) regardless of time-management mode.
             AllocatedTimeMs := TM_UNLIMITED_MS;
             Log('Received go infinite. Searching until stop command or depth 50.');
           end
           else if SL.IndexOf('depth') <> -1 then
           begin
             HardDepthLimit := GetParamValue(SL, 'depth', 5);
-            SearchDepth := HardDepthLimit;
             if HardDepthLimit < 1 then HardDepthLimit := 1;
             Log('Received go depth ' + IntToStr(HardDepthLimit));
           end
@@ -8957,7 +7925,7 @@ begin
             AllocatedTimeMs := GetParamValue(SL, 'movetime', 0);
             AllocatedTimeMs := AllocatedTimeMs - 50; // Safety margin
             if AllocatedTimeMs < 50 then AllocatedTimeMs := 50;
-            HardDepthLimit := SearchDepth;
+            HardDepthLimit := 50;  // v2.0.0beta1: time decides, as for wtime/btime (was SearchDepth, default 10)
             Log('Received go movetime ' + IntToStr(AllocatedTimeMs));
           end
 
@@ -8999,6 +7967,42 @@ begin
 
             if MyTime > 0 then
             begin
+              // v2.0: measured move overhead (see MOVE OVERHEAD at the
+              // globals). First take the LAG sample for our previous move:
+              // the GUI charged (previous clock + increment - this clock), we
+              // measured LagPrevOwnMs ourselves; the difference is lag we
+              // cannot see. Only when this is our very next move in the same
+              // game and no time-control refill happened in between.
+              ClockGo := True;
+              if LagPrevValid and (State.SideToMove = LagPrevSide) and
+                 (State.FullMoveNumber = LagPrevFullMove + 1) and
+                 (LagPrevMovestogo <> 1) then
+              begin
+                LagSample := (LagPrevClock + LagPrevInc - MyTime) - LagPrevOwnMs;
+                if (LagSample >= -SAMPLE_MAX_MS) and (LagSample <= SAMPLE_MAX_MS) then
+                begin
+                  if LagSample < 0 then LagSample := 0;   // GUI measured less than we did
+                  LagPeakMs := Max(LagSample, LagPeakMs - (LagPeakMs + 15) div 16);
+                end;
+              end;
+              LagPrevValid     := False;                // re-armed after 'bestmove'
+              LagPrevClock     := MyTime;               // RAW clock, before the overhead
+              LagPrevInc       := MyInc;
+              LagPrevMovestogo := Movestogo;
+              LagPrevSide      := State.SideToMove;
+              LagPrevFullMove  := State.FullMoveNumber;
+
+              MoveOverheadMs := Min(OVERHEAD_MAX_MS, LagPeakMs + StopPeakMs + OVERHEAD_SAFETY_MS);
+
+              // The test above still sees the RAW clock (it decides whether a
+              // clock was sent at all); everything below works on the clock
+              // minus the overhead. Floor 1 ms: MyTime must stay positive, and
+              // the final clamp below already turns a tiny clock into a 1 ms
+              // allocation -- never into 0 (= no time management in
+              // GetBestMove).
+              MyTime := MyTime - MoveOverheadMs;
+              if MyTime < 1 then MyTime := 1;
+
               // =============================================================
               // v1.01: base per-move allocation, branched on control type.
               //
@@ -9086,25 +8090,38 @@ begin
               if MinAlloc < 5 then MinAlloc := 5;
               if AllocatedTimeMs < MinAlloc then AllocatedTimeMs := MinAlloc;
 
-              if MyTime <= 500 then
-                AllocatedTimeMs := MyTime div 2
-              else if AllocatedTimeMs > MyTime - Max(100, MyTime div 10) then
-                AllocatedTimeMs := MyTime - Max(100, MyTime div 10);
 
-              // Cap the allocation so the downstream abort ceiling
-              // (ExceedCeilingAbortMs = AllocatedTimeMs * EXCEED_CEILING_FACTOR_PCT/100)
-              // can never exceed the remaining clock minus the reserve. MyTime is
-              // valid here (freshly set from the 'go' command); GetBestMove sees
-              // only AllocatedTimeMs, so the clamp must happen here.
-              CeilingCapAlloc := ((MyTime - Max(100, MyTime div 10)) * 100)
-                                 div EXCEED_CEILING_FACTOR_PCT;
+
+              // Reserve kept back from the clock: half of it at <= 500 ms,
+              // otherwise max(100 ms, 10%). The ceiling cap below MUST use the
+              // same reserve -- a fixed 100 ms made it negative on small clocks.
+              if MyTime <= 500 then
+                Reserve := MyTime div 2
+              else
+                Reserve := Max(100, MyTime div 10);
+
+              if AllocatedTimeMs > MyTime - Reserve then
+                AllocatedTimeMs := MyTime - Reserve;
+
+              CeilingCapAlloc := ((MyTime - Reserve) * 100) div EXCEED_CEILING_FACTOR_PCT;
               if AllocatedTimeMs > CeilingCapAlloc then
                 AllocatedTimeMs := CeilingCapAlloc;
 
+              // 0 or negative means "no time management" to GetBestMove, i.e. an
+              // unlimited search. Never hand that over under a real clock.
+              if AllocatedTimeMs < 1 then AllocatedTimeMs := 1;
+
+
+
               Log('Time control detected. Allocated ' + IntToStr(AllocatedTimeMs) +
                 'ms for this move (move ' + IntToStr(State.FullMoveNumber) +
+                ', clock ' + IntToStr(MyTime) + '+' + IntToStr(MyInc) +
+                ' (after overhead ' + IntToStr(MoveOverheadMs) +
+                ' = lag ' + IntToStr(LagPeakMs) + ' + stop ' + IntToStr(StopPeakMs) +
+                ' + ' + IntToStr(OVERHEAD_SAFETY_MS) + ', poll ' + IntToStr(PollNodes) + ' nodes)' +
                 ', divisor ' + IntToStr(TimeDivisor) +
-                ', movestogo ' + IntToStr(Movestogo) + ')');
+                ', movestogo ' + IntToStr(Movestogo) +
+                ', util_corr ' + IntToStr((TMSumAllocMs * 100) div (TMSumUsedMs + 1)) + '%)');
             end
             else
             begin
@@ -9170,9 +8187,40 @@ begin
         end;
 
         AbortSearch := False;
-        BestMoveStr := GetBestMove(AllocatedTimeMs, HardDepthLimit);
+        if NNUE_Available then
+          BestMoveStr := GetBestMove(AllocatedTimeMs, HardDepthLimit)
+        else
+        begin
+          // v2.0: the NNUE is the only evaluation. Refuse loudly rather than
+          // play: '0000' is the UCI null move, which a GUI scores as a loss,
+          // so a misconfigured match cannot pass for a result.
+          WriteLn('info string ERROR: no net loaded (', EvalFileName,
+                  ') -- not searching. setoption name EvalFile value <absolute path>');
+          Log('ERROR: go without a net loaded');
+          BestMoveStr := '0000';
+        end;
 
         WriteLn('bestmove ', BestMoveStr);
+        Flush(Output);  // v2.0: 'bestmove' must be out before the own time is taken
+
+        // v2.0: measured move overhead -- record this move's own time for the
+        // LAG sample at our next 'go', and take a STOP sample if the abort
+        // ceiling ended the search (ceiling crossing -> 'bestmove' written).
+        if ClockGo then
+        begin
+          LagPrevOwnMs := Integer(ClockMs - GoTick);
+          LagPrevValid := True;
+          if CeilingHit then
+          begin
+            StopSample := LagPrevOwnMs -
+                          (Integer(SearchStartTime - GoTick) + ExceedCeilingAbortMs);
+            if (StopSample >= 0) and (StopSample <= SAMPLE_MAX_MS) then
+              StopPeakMs := Max(StopSample, StopPeakMs - (StopPeakMs + 15) div 16);
+          end;
+        end
+        else
+          LagPrevValid := False;
+
         Log('<< SEND: bestmove ' + BestMoveStr);
 
         if display then
@@ -9183,6 +8231,26 @@ begin
         Display:=true;
         DisplayBoardSimple;//display board in ascii for debugging
       end
+      // v1.10: NNUE validation commands. See pasknight_nnue_cmds.inc.
+      //   nnue check [plies]    incremental vs full-recompute accumulator
+      //   nnue testvec <file>   Pascal forward pass vs the Python reference
+      //   nnue stats            peak accumulator magnitude
+      //   nnue embed <file.nnue> <out.inc> [name]   write pasknight_net.inc
+      // NOTE: the 'fen' branch above matches ANY line containing "fen", so a
+      // path such as C:\defence\nnue10.nnue never reaches this branch.
+      else if Pos('nnue', InputLine) = 1 then
+      begin
+        NNUE_Command(Trim(Copy(InputLine, 5, MaxInt)));
+      end
+
+      {$IFDEF NNUE_GENDATA}
+      // gendata <count> <file>  -- training-data generator, gendata builds only
+      else if Pos('gendata', InputLine) = 1 then
+      begin
+        GenData_Command(Trim(Copy(InputLine, 8, MaxInt)));
+      end
+      {$ENDIF}
+
       else if Pos('bench', InputLine) = 1 then
       begin
         // bench           -> run at default depth 8

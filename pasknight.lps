@@ -3,396 +3,238 @@
   <ProjectSession>
     <PathDelim Value="\"/>
     <Version Value="12"/>
-    <BuildModes Active="Default"/>
+    <BuildModes Active="Release"/>
     <Units>
       <Unit>
         <Filename Value="pasknight.lpr"/>
         <IsPartOfProject Value="True"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="6474"/>
-        <CursorPos X="22" Y="6489"/>
-        <UsageCount Value="20"/>
-      </Unit>
-      <Unit>
-        <Filename Value="C:\astap.fpc\astap_main.pas"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="57"/>
-        <CursorPos X="88" Y="75"/>
-        <UsageCount Value="8"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0911.lpr.txt"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="1749"/>
-        <CursorPos Y="1749"/>
-        <UsageCount Value="7"/>
-        <DefaultSyntaxHighlighter Value="Text"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\PasKnight_v0913.pas"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2609"/>
-        <CursorPos X="5" Y="2646"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\PasKnight_v0912.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2583"/>
-        <CursorPos X="31" Y="2614"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\PasNight.lpr"/>
-        <UnitName Value="PasKnight_v092"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2528"/>
-        <CursorPos X="2" Y="2565"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="C:\astap.fpc\unit_profiler.pas"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="32"/>
-        <CursorPos Y="33"/>
-        <UsageCount Value="10"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0935.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2190"/>
-        <CursorPos X="10" Y="2209"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0937.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="1441"/>
-        <CursorPos X="29" Y="1462"/>
-        <UsageCount Value="10"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0938.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2377"/>
-        <CursorPos Y="2364"/>
-        <UsageCount Value="10"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\PasKnight_v0930.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="211"/>
-        <CursorPos X="41" Y="211"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0939.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2624"/>
-        <CursorPos X="5" Y="2641"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0954.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="3270"/>
-        <CursorPos Y="3281"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0955.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="96"/>
-        <CursorPos X="28" Y="132"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0963.lpr.txt"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2818"/>
-        <CursorPos X="20" Y="2840"/>
-        <UsageCount Value="3"/>
-        <DefaultSyntaxHighlighter Value="Text"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0965.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="4306"/>
-        <CursorPos Y="4323"/>
-        <UsageCount Value="3"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0965a.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="4600"/>
-        <CursorPos Y="4615"/>
-        <UsageCount Value="3"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0967.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="1494"/>
-        <CursorPos X="3" Y="1527"/>
-        <UsageCount Value="3"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0983.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2802"/>
-        <CursorPos Y="2816"/>
-        <UsageCount Value="6"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0979.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2511"/>
-        <CursorPos X="19" Y="2309"/>
-        <UsageCount Value="3"/>
-      </Unit>
-      <Unit>
-        <Filename Value="D:\temp\v0988_search.pas"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="773"/>
-        <CursorPos X="5" Y="815"/>
-        <UsageCount Value="5"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0988.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="421"/>
-        <UsageCount Value="5"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0997c.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="6178"/>
-        <CursorPos Y="6215"/>
-        <UsageCount Value="5"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v09991.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="5372"/>
-        <CursorPos X="21" Y="5405"/>
-        <UsageCount Value="5"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v0998.lpr.txt"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="346"/>
-        <CursorPos X="26" Y="369"/>
-        <UsageCount Value="5"/>
-        <DefaultSyntaxHighlighter Value="Text"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v09992.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="2692"/>
-        <CursorPos X="17" Y="2686"/>
-        <UsageCount Value="5"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v09999.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="628"/>
-        <CursorPos Y="651"/>
-        <UsageCount Value="7"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\test\pasknight_v100pr1.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="623"/>
-        <CursorPos Y="651"/>
-        <UsageCount Value="11"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\pasknight_v100rc6.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="133"/>
-        <UsageCount Value="8"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\pasknight_v100rc5.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="82"/>
-        <UsageCount Value="8"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\texel_tuner.pas"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="650"/>
-        <CursorPos Y="695"/>
-        <UsageCount Value="8"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\pasknight_texel_tuner.pas"/>
-        <EditorIndex Value="-1"/>
-        <CursorPos X="10" Y="2448"/>
-        <UsageCount Value="20"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\pasknight_v100rc8d.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="3543"/>
-        <CursorPos Y="3583"/>
-        <UsageCount Value="8"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\tuned_pst.pas"/>
-        <EditorIndex Value="-1"/>
-        <CursorPos X="31" Y="195"/>
-        <UsageCount Value="20"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\pasknight_v100rc21a.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="969"/>
-        <CursorPos Y="990"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\test\unit_nnue.pas"/>
-        <EditorIndex Value="-1"/>
-        <UsageCount Value="9"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\pasknight.lpr"/>
-        <EditorIndex Value="-1"/>
-        <TopLine Value="9208"/>
-        <UsageCount Value="11"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
         <IsVisibleTab Value="True"/>
-        <TopLine Value="2297"/>
-        <CursorPos X="30" Y="2331"/>
-        <UsageCount Value="13"/>
+        <TopLine Value="1874"/>
+        <CursorPos X="26" Y="1878"/>
+        <UsageCount Value="213"/>
         <Loaded Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="test4\tuned_pst.pas"/>
-        <EditorIndex Value="1"/>
-        <TopLine Value="151"/>
-        <CursorPos X="31" Y="195"/>
-        <UsageCount Value="13"/>
-        <Loaded Value="True"/>
-      </Unit>
-      <Unit>
-        <Filename Value="test\pasknight_v100rc21_.lpr"/>
+        <Filename Value="pasknight_nnue_gendata.inc"/>
         <EditorIndex Value="-1"/>
-        <TopLine Value="925"/>
-        <CursorPos X="57" Y="943"/>
+        <CursorPos X="7" Y="8"/>
+        <UsageCount Value="64"/>
+      </Unit>
+      <Unit>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="159"/>
+        <CursorPos X="61" Y="168"/>
+        <UsageCount Value="68"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="E:\ccdciel\ccdciel-master\src\cu_autoguider_internal.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1701"/>
+        <CursorPos X="16" Y="1737"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="E:\ccdciel\ccdciel-master older\src\cu_autoguider_internal.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1679"/>
+        <CursorPos X="24" Y="1715"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="E:\ccdciel\ccdciel-master_org\ccdciel-master\src\cu_autoguider_internal.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1677"/>
+        <CursorPos X="114" Y="1713"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="pasknight_nnue_cmds.inc"/>
+        <EditorIndex Value="1"/>
+        <TopLine Value="135"/>
+        <CursorPos Y="141"/>
+        <UsageCount Value="63"/>
+        <Loaded Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\astap.fpc\unit_star_align.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1516"/>
+        <CursorPos X="22" Y="1524"/>
+        <UsageCount Value="13"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\astap.fpc\unit_stack_routines.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="566"/>
+        <CursorPos X="22" Y="585"/>
+        <UsageCount Value="13"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\astap.fpc\unit_stack.pas"/>
+        <ComponentName Value="stackmenu1"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="5903"/>
+        <CursorPos X="18" Y="5921"/>
+        <UsageCount Value="13"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\astap.fpc\unit_astrometric_solving.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1176"/>
+        <CursorPos X="27" Y="1157"/>
+        <UsageCount Value="13"/>
+      </Unit>
+      <Unit>
+        <Filename Value="pasknight_net.inc"/>
+        <EditorIndex Value="-1"/>
+        <CursorPos X="83" Y="5"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="C:\PasKnight2.00.fpc\pasknight_unit_nnue.pas"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="199"/>
+        <CursorPos X="4" Y="219"/>
+        <UsageCount Value="10"/>
+      </Unit>
+      <Unit>
+        <Filename Value="pasknight_nnue.lpr"/>
+        <UnitName Value="pasknight"/>
+        <EditorIndex Value="-1"/>
+        <TopLine Value="1775"/>
+        <CursorPos X="57" Y="1795"/>
         <UsageCount Value="10"/>
       </Unit>
     </Units>
-    <JumpHistory HistoryIndex="22">
+    <JumpHistory HistoryIndex="28">
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="531" Column="49" TopLine="497"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="2972" Column="5" TopLine="2971"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="532" Column="49" TopLine="498"/>
+        <Filename Value="pasknight_nnue_cmds.inc"/>
+        <Caret Line="213" Column="9" TopLine="136"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="533" Column="49" TopLine="499"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1888" Column="5" TopLine="1870"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="535" Column="51" TopLine="501"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1907" Column="5" TopLine="1888"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="928" Column="39" TopLine="894"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1888" Column="5" TopLine="1868"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="947" Column="58" TopLine="913"/>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <Caret Line="219" Column="4" TopLine="199"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="952" Column="14" TopLine="918"/>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <Caret Line="178" Column="22" TopLine="157"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="966" Column="16" TopLine="932"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1907" Column="5" TopLine="1887"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="973" Column="27" TopLine="939"/>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <Caret Line="979" Column="44" TopLine="959"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="980" Column="51" TopLine="946"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1888" Column="5" TopLine="1858"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1028" Column="12" TopLine="995"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1892" Column="18" TopLine="1887"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1357" Column="18" TopLine="1324"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="2955" Column="52" TopLine="2923"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1369" Column="65" TopLine="1336"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="2962" Column="36" TopLine="2930"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1625" Column="15" TopLine="1591"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="2999" Column="19" TopLine="2967"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1696" Column="60" TopLine="1662"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3009" Column="23" TopLine="2977"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1714" Column="39" TopLine="1680"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3016" Column="23" TopLine="2984"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="1757" Column="14" TopLine="1723"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3024" Column="21" TopLine="2992"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="8" Column="138"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3031" Column="21" TopLine="2999"/>
       </Position>
       <Position>
-        <Filename Value="test4\tuned_pst.pas"/>
-        <Caret Line="160" Column="36" TopLine="154"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3038" Column="21" TopLine="3006"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="182" TopLine="169"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3045" Column="21" TopLine="3013"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="10" Column="10"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3055" Column="17" TopLine="3023"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="101" Column="85" TopLine="67"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="3066" Column="19" TopLine="3034"/>
       </Position>
       <Position>
-        <Filename Value="test4\pasknight_texel_tuner.pas"/>
-        <Caret Line="192" Column="41" TopLine="158"/>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="243" Column="31" TopLine="223"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1855" Column="79" TopLine="1823"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1867" Column="18" TopLine="1835"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <Caret Line="1010" Column="44" TopLine="990"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight_nnue_cmds.inc"/>
+        <Caret Line="141" TopLine="135"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight_unit_nnue.pas"/>
+        <Caret Line="168" Column="61" TopLine="159"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1861" Column="26" TopLine="1841"/>
       </Position>
     </JumpHistory>
     <RunParams>
       <FormatVersion Value="2"/>
-      <Modes ActiveMode="default">
-        <Mode Name="default"/>
-      </Modes>
+      <Modes ActiveMode=""/>
     </RunParams>
     <HistoryLists>
       <List Name="LaunchingApplication" Type="File" Count="1">
         <Item1 Value="C:\Windows\system32\cmd.exe /C ${TargetCmdLine}"/>
-      </List>
-      <List Name="CommandLineParameters" Count="3">
-        <Item1 Value="D:\temp\ChessTrainingSets-master\ChessTrainingSets-master\quiet-labeled.epd"/>
-        <Item2 Value="D:\temp\ChessTrainingSets-master\ChessTrainingSets-master\quiet-labeled.epd "/>
-        <Item3 Value="lichess-big3-resolved.book"/>
       </List>
     </HistoryLists>
   </ProjectSession>
@@ -503,6 +345,27 @@
         <Source Value="test4\test\test\pasknight_v100rc3g.lpr"/>
         <Line Value="7369"/>
       </Item>
+      <Item>
+        <Kind Value="bpkSource"/>
+        <WatchScope Value="wpsLocal"/>
+        <WatchKind Value="wpkWrite"/>
+        <Source Value="pasknight_nnue_cmds.inc"/>
+        <Line Value="367"/>
+      </Item>
+      <Item>
+        <Kind Value="bpkSource"/>
+        <WatchScope Value="wpsLocal"/>
+        <WatchKind Value="wpkWrite"/>
+        <Source Value="pasknight_nnue.lpr"/>
+        <Line Value="9409"/>
+      </Item>
+      <Item>
+        <Kind Value="bpkSource"/>
+        <WatchScope Value="wpsLocal"/>
+        <WatchKind Value="wpkWrite"/>
+        <Source Value="pasknight_nnue.lpr"/>
+        <Line Value="9388"/>
+      </Item>
     </BreakPoints>
     <Watches>
       <Item>
@@ -534,6 +397,9 @@
       </Item>
       <Item>
         <Expression Value="i"/>
+      </Item>
+      <Item>
+        <Expression Value="usennue"/>
       </Item>
     </Watches>
   </Debugging>

@@ -1,0 +1,22 @@
+
+
+//Merge
+cd /d E:\pytorch\pasknight-nnue
+E:\pytorch\nnue-pytorch-master\venv\Scripts\activate.bat
+python merge_shuffle.py C:\PasKnight2.fpc\sp*.bin C:\PasKnight2.fpc\n*.bin  --train all9_train.bin --val all9_val.bin
+
+
+//Train
+python -u train_nnue.py --train all9_train.bin --val all9_val.bin --out nnue9.npz --epochs 30 --threads 6 --loss wdl > nnue9_train.log 2>&1
+
+Monitor in powershell the progress by: 
+cmd
+cd /d E:\pytorch\pasknight-nnue
+powershell
+Get-Content nnue9_train.log -Wait -Tail 20
+
+
+//Export:
+python export_nnue.py --net nnue9.npz --out nnue9.nnue --testvec testvec9.txt --val all9_val.bin > nnue9_export.log 2>&1
+
+type nnue9_export.log
