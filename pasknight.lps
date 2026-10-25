@@ -8,24 +8,25 @@
       <Unit>
         <Filename Value="pasknight.lpr"/>
         <IsPartOfProject Value="True"/>
-        <IsVisibleTab Value="True"/>
-        <TopLine Value="1874"/>
-        <CursorPos X="26" Y="1878"/>
+        <TopLine Value="1315"/>
+        <CursorPos X="20" Y="1351"/>
         <UsageCount Value="213"/>
         <Loaded Value="True"/>
       </Unit>
       <Unit>
         <Filename Value="pasknight_nnue_gendata.inc"/>
-        <EditorIndex Value="-1"/>
-        <CursorPos X="7" Y="8"/>
+        <IsVisibleTab Value="True"/>
+        <EditorIndex Value="2"/>
+        <TopLine Value="72"/>
+        <CursorPos Y="92"/>
         <UsageCount Value="64"/>
+        <Loaded Value="True"/>
       </Unit>
       <Unit>
         <Filename Value="pasknight_unit_nnue.pas"/>
-        <EditorIndex Value="2"/>
-        <TopLine Value="159"/>
-        <CursorPos X="61" Y="168"/>
-        <UsageCount Value="68"/>
+        <EditorIndex Value="3"/>
+        <CursorPos Y="8"/>
+        <UsageCount Value="70"/>
         <Loaded Value="True"/>
       </Unit>
       <Unit>
@@ -52,9 +53,8 @@
       <Unit>
         <Filename Value="pasknight_nnue_cmds.inc"/>
         <EditorIndex Value="1"/>
-        <TopLine Value="135"/>
-        <CursorPos Y="141"/>
-        <UsageCount Value="63"/>
+        <CursorPos X="25" Y="21"/>
+        <UsageCount Value="65"/>
         <Loaded Value="True"/>
       </Unit>
       <Unit>
@@ -110,122 +110,126 @@
         <UsageCount Value="10"/>
       </Unit>
     </Units>
-    <JumpHistory HistoryIndex="28">
+    <JumpHistory HistoryIndex="29">
       <Position>
         <Filename Value="pasknight.lpr"/>
-        <Caret Line="2972" Column="5" TopLine="2971"/>
+        <Caret Line="4764" Column="67" TopLine="4732"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4797" Column="41" TopLine="4765"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4801" Column="19" TopLine="4769"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4803" Column="54" TopLine="4771"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4804" Column="51" TopLine="4772"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4805" Column="25" TopLine="4773"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4808" Column="69" TopLine="4776"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4811" Column="13" TopLine="4779"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4812" Column="13" TopLine="4780"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4813" Column="13" TopLine="4781"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4816" Column="72" TopLine="4784"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4817" Column="64" TopLine="4785"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4839" Column="16" TopLine="4807"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4845" Column="22" TopLine="4813"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4850" Column="14" TopLine="4818"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4851" Column="66" TopLine="4819"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4854" Column="27" TopLine="4822"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4856" Column="62" TopLine="4824"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4857" Column="41" TopLine="4825"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="4848" Column="63" TopLine="4830"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="6328" Column="38" TopLine="6296"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="6523" Column="26" TopLine="6491"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="6681" Column="64" TopLine="6649"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="6691" Column="30" TopLine="6659"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="6710" Column="30" TopLine="6678"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1143" Column="64" TopLine="1123"/>
+      </Position>
+      <Position>
+        <Filename Value="pasknight.lpr"/>
+        <Caret Line="1164" Column="10" TopLine="1132"/>
       </Position>
       <Position>
         <Filename Value="pasknight_nnue_cmds.inc"/>
-        <Caret Line="213" Column="9" TopLine="136"/>
+        <Caret Line="21" Column="25"/>
       </Position>
       <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1888" Column="5" TopLine="1870"/>
+        <Filename Value="pasknight_nnue_gendata.inc"/>
+        <Caret Line="92" Column="7" TopLine="72"/>
       </Position>
       <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1907" Column="5" TopLine="1888"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1888" Column="5" TopLine="1868"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_unit_nnue.pas"/>
-        <Caret Line="219" Column="4" TopLine="199"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_unit_nnue.pas"/>
-        <Caret Line="178" Column="22" TopLine="157"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1907" Column="5" TopLine="1887"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_unit_nnue.pas"/>
-        <Caret Line="979" Column="44" TopLine="959"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1888" Column="5" TopLine="1858"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1892" Column="18" TopLine="1887"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="2955" Column="52" TopLine="2923"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="2962" Column="36" TopLine="2930"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="2999" Column="19" TopLine="2967"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3009" Column="23" TopLine="2977"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3016" Column="23" TopLine="2984"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3024" Column="21" TopLine="2992"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3031" Column="21" TopLine="2999"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3038" Column="21" TopLine="3006"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3045" Column="21" TopLine="3013"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3055" Column="17" TopLine="3023"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="3066" Column="19" TopLine="3034"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="243" Column="31" TopLine="223"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1855" Column="79" TopLine="1823"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1867" Column="18" TopLine="1835"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_unit_nnue.pas"/>
-        <Caret Line="1010" Column="44" TopLine="990"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_nnue_cmds.inc"/>
-        <Caret Line="141" TopLine="135"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight_unit_nnue.pas"/>
-        <Caret Line="168" Column="61" TopLine="159"/>
-      </Position>
-      <Position>
-        <Filename Value="pasknight.lpr"/>
-        <Caret Line="1861" Column="26" TopLine="1841"/>
+        <Filename Value="pasknight_nnue_gendata.inc"/>
+        <Caret Line="334" Column="33" TopLine="302"/>
       </Position>
     </JumpHistory>
     <RunParams>

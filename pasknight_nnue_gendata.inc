@@ -89,7 +89,6 @@ const
   { --- self-play constants ------------------------------------------------ }
 
   SP_NODES_DEFAULT = 5000;   { per search iteration; see GenSPSearch          }
-  SP_MAX_DEPTH     = 64;     { ceiling only -- the node limit is the real bound }
 
   { Random opening plies, played with the SEE-filtered random picker rather
     than uniformly at random: a uniform random opening hangs a piece within a
@@ -331,7 +330,7 @@ begin
   ExceedCeilingAbortMs := 0;          { no wall-clock abort: nodes are the bound }
   SearchStartTime      := ClockMs;
 
-  for d := 1 to SP_MAX_DEPTH do
+  for d := 1 to MAX_SEARCH_DEPTH do
   begin
     SearchNodes    := 0;
     NodeCheckCount := 0;

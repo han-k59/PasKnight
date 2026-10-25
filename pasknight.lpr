@@ -7,6 +7,9 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.   }
 
+//Homepage https://sourceforge.net/projects/pasknight/
+//No so often updated: https://github.com/han-k59/PasKnight/
+
 {$APPTYPE CONSOLE}
 {$mode objfpc}{$H+}
 
@@ -25,7 +28,7 @@ uses
   pasknight_unit_nnue;
 
 const
-  Version: string = 'v2.0.0ß1';
+  Version: string = 'v2.0.0';
 
 
 {Some notes about terminology:
@@ -523,6 +526,40 @@ prunes almost all other move options in the tree. }
                     parser); go movetime 5000 passes depth 10; go depth 7
                     stops at 7 and does not limit a following go movetime.
                     40/7s play is on an unchanged code path: no SPRT.
+                 j. v2.0.0: OwnBook default FALSE (CCRL disables engine
+                    books; a stray .pgn next to the exe is no longer loaded
+                    unasked). Book reporting: GetBestMove sets
+                    LastMoveFromBook and prints 'info string Book: <move>
+                    from <file>' (was 'info Found something in the opening
+                    book'); LoadAllOpeningBooks keeps the loaded names in
+                    BookFiles. Play mode prints the book in use and marks
+                    each engine move '(book move, <file>)' or, once,
+                    '(out of book, searched)'. Play mode reloads the book
+                    whenever none is in memory: before, a 'y' after a failed
+                    load, an 'n' game or bench played without a book.
+                    Gates: bench 12 unchanged; play with y shows the book and
+                    book moves; n then y in one session still uses the book.
+                 k. v2.0.0: play mode. Self-play stops with 'q' between
+                    moves (PlayStopRequested: console input events on a
+                    console, where PeekNamedPipe/InputReady never sees input;
+                    a line 'q' on a pipe). GameEnded also ends a game drawn by
+                    threefold repetition, the fifty-move rule or insufficient
+                    material (existing IsThreefoldRepetition /
+                    IsInsufficientMaterial / HalfMoveClock). Search untouched.
+                    The self-play depth ceiling of 100 is harmless: Killers is
+                    indexed by REMAINING depth, which extensions never raise
+                    above the root depth.
+                    Gates: bench 12 unchanged; self-play stopped with q; a
+                    game ending in a repetition draw.
+                 l. v2.0.0: one depth ceiling, MAX_SEARCH_DEPTH = 64, for go
+                    (all modes; was 50), self-play (was 100), go depth N and
+                    bench N (were UNCAPPED; now clamped, go depth reports it)
+                    and as a clamp in GetBestMove. Killers is sized from it,
+                    [0..MAX_SEARCH_DEPTH] (was [0..100]): before, 'go depth
+                    150' wrote past the end of Killers. Results only differ
+                    in positions whose search reaches the ceiling.
+                    Gates: bench 12 unchanged; go depth 100 reports the limit
+                    and stops at 64.
               3. After v2.0.0: two perspectives (shared weights, stm-relative
                  output, 512 into layer 2), then king buckets on top: mirrored,
                  ~4 buckets chosen from the measured king-square distribution,
@@ -1301,8 +1338,20 @@ var
   // Repetition Detection History (removed global GamePly, use State.GamePly)
   GameHistory: array[0..2048] of QWord;
 
+const
+  // v2.0.0: THE search depth ceiling (iterative-deepening iterations) for
+  // every caller: go (time, movetime, nodes, infinite), go depth N, bench N
+  // and play. go depth / bench are clamped to it, and GetBestMove clamps its
+  // MaxDepth as the safety net. Killers is indexed by the REMAINING depth,
+  // which is at most the iteration depth - 1 (extensions never raise it), so
+  // sizing Killers from this constant keeps the table and the limit in step.
+  // Before: 50 for go, 100 for self-play, NO cap for go depth / bench, and
+  // Killers[0..100] -- 'go depth 150' wrote past the end of the table.
+  // gendata's SP_MAX_DEPTH (64) must stay <= this.
+  MAX_SEARCH_DEPTH = 64;
+var
   // Killer Moves for Move Ordering
-  Killers: array[0..100, 0..1] of TMove;
+  Killers: array[0..MAX_SEARCH_DEPTH, 0..1] of TMove;
 
   // History Heuristic for Move Ordering
   // Indexed by [Side, FromR, FromC, ToR, ToC]. Incremented by Depth*Depth
@@ -1323,13 +1372,16 @@ var // Opening Book
    BookCount: integer;
    BookLoaded: boolean;
    bookFileName : string='*';
+   // v2.0.0: which book is in memory, and whether the last move came from it.
+   BookFiles: string = '';          // file name(s) loaded by LoadAllOpeningBooks, '' if none
+   LastMoveFromBook: boolean = False; // set by GetBestMove: True = book move, no search
    // v2.0: UCI option OwnBook. Gates both LOADING (isready / go) and USE
    // (GetBestMove) of the engine's own book. Before v2.0, 'OwnBook false'
    // only zeroed BookCount, and the first isready -- which a GUI sends AFTER
    // its setoptions -- loaded the book again (~6 s for 8moves_v3.pgn) and
    // switched it back on. GetBookMove itself is not gated: gendata's
    // 'pgnbook' mode calls it directly and loads the book explicitly.
-   OwnBook: boolean = True;
+   OwnBook: boolean = False;
    logfile: boolean=false;
 
 
@@ -1376,6 +1428,61 @@ var // Opening Book
      Result := False;
  end;
  {$ENDIF}
+
+
+function PlayStopRequested: boolean;
+// v2.0.0: 'q' for self-play, checked BETWEEN moves (so it stops after the
+// current move). InputReady cannot be used in a console window: it uses
+// PeekNamedPipe, which only works when stdin is a pipe (a GUI) and always
+// reports "no input" on a console. So on a console the pending console
+// input events are read directly: a 'q' key press (no Enter needed) stops,
+// everything else -- other keys, mouse and focus events -- is discarded, so
+// nothing typed during self-play ends up in a later ReadLn. On a pipe (or on
+// Unix) a line 'q' stops. The search's own input check is not touched.
+{$IFDEF WINDOWS}
+var
+  h: THandle;
+  mode, n, got, i: DWORD;
+  rec: array[0..31] of INPUT_RECORD;
+  Line: string;
+begin
+  Result := False;
+  h := GetStdHandle(STD_INPUT_HANDLE);
+  mode := 0;
+  if GetConsoleMode(h, mode) then
+  begin
+    n := 0;
+    while GetNumberOfConsoleInputEvents(h, n) and (n > 0) do
+    begin
+      if n > Length(rec) then n := Length(rec);
+      got := 0;
+      if not ReadConsoleInput(h, rec[0], n, got) then Break;
+      if got = 0 then Break;
+      for i := 0 to got - 1 do
+        if (rec[i].EventType = KEY_EVENT) and
+           rec[i].Event.KeyEvent.bKeyDown and
+           (rec[i].Event.KeyEvent.wVirtualKeyCode = Ord('Q')) then
+          Result := True;
+    end;
+  end
+  else if InputReady then
+  begin
+    ReadLn(Line);
+    Result := LowerCase(Trim(Line)) = 'q';
+  end;
+end;
+{$ELSE}
+var
+  Line: string;
+begin
+  Result := False;
+  if InputReady then
+  begin
+    ReadLn(Line);
+    Result := LowerCase(Trim(Line)) = 'q';
+  end;
+end;
+{$ENDIF}
 
 
 procedure Log(const Msg: string);
@@ -3588,6 +3695,7 @@ begin
     QuickSortBook(0, BookCount - 1);
 
   BookLoaded := BookCount > 0;
+  if BookLoaded then BookFiles := LoadedFiles else BookFiles := '';
   if BookLoaded then
   begin
     // v2.0: name the file(s) actually loaded, not the search pattern (*.pgn)
@@ -3597,7 +3705,7 @@ begin
   else
   begin
     Log('Book: No opening book ' + bookfilename + ' found — using engine search only');
-    writeln('info string Book: No opening book ' + bookfilename + ' found — using engine search only');
+    writeln('info string Book: No opening book ' + bookfilename + ' found using engine search only');
   end;
 end;
 
@@ -6276,11 +6384,17 @@ var
   EffBudget: QWord;           // per-move budget after easy shrink / panic extend.
 begin
   // === OPENING BOOK CHECK ===
+  // v2.0.0: safety net for every caller (see MAX_SEARCH_DEPTH)
+  if MaxDepth > MAX_SEARCH_DEPTH then MaxDepth := MAX_SEARCH_DEPTH;
+  LastMoveFromBook := False;
   if OwnBook then BookMove := GetBookMove   // v2.0: OwnBook false = never from book
              else BookMove := '';
   if BookMove <> '' then
   begin
-    InfoLine := 'info Found something in the opening book';
+    // v2.0.0: name the move and the book, as an 'info string' (the old
+    // 'info Found something in the opening book' was not valid UCI info).
+    LastMoveFromBook := True;
+    InfoLine := 'info string Book: ' + BookMove + ' from ' + BookFiles;
     WriteLn(InfoLine);
     Flush(Output);
     Log(InfoLine);
@@ -7025,6 +7139,9 @@ begin
     WriteLn('  setoption name EvalFile value <absolute path of the .nnue>');
     Exit;
   end;
+  // v2.0.0: clamp, so the depth printed below is the depth searched
+  if BenchDepth < 1 then BenchDepth := 1;
+  if BenchDepth > MAX_SEARCH_DEPTH then BenchDepth := MAX_SEARCH_DEPTH;
   SavedSeed  := RandSeed;
   SavedState := State;
 
@@ -7233,6 +7350,7 @@ var
   PlayDepth, HumanSide: integer;   // HumanSide: 0 = white, 1 = black; -1 = self-play (computer vs computer)
   MoveTimeMs: integer;             // per-move time budget in self-play (time per 40 moves / 40)
   UseBook: boolean;
+  InBook: boolean;                 // v2.0.0: still in book this game (for the 'out of book' note)
   Line: string;
   HM: TMove;
   MoveNo: integer;
@@ -7261,8 +7379,12 @@ var
       end;
   end;
 
-  // Report game state after a move: checkmate / stalemate / ongoing.
+  // Report game state after a move: checkmate / stalemate / draw / ongoing.
   // Returns True if the game has ended.
+  // v2.0.0: also the three draws the search already knows: threefold
+  // repetition (GameHistory holds every game position, DoMakeMove records
+  // it), the fifty-move rule and insufficient material. Mate and stalemate
+  // are tested first, so a mate on the 100th half-move is still a mate.
   function GameEnded: boolean;
   var
     Moves: TMoveList;
@@ -7281,6 +7403,21 @@ var
       end
       else
         WriteLn('Stalemate - draw.');
+    end
+    else if IsThreefoldRepetition then
+    begin
+      WriteLn('Draw by threefold repetition.');
+      Result := True;
+    end
+    else if State.HalfMoveClock >= 100 then
+    begin
+      WriteLn('Draw by the fifty-move rule.');
+      Result := True;
+    end
+    else if IsInsufficientMaterial then
+    begin
+      WriteLn('Draw by insufficient material.');
+      Result := True;
     end;
   end;
 
@@ -7296,7 +7433,7 @@ var
     AbortSearch := False;
     if HumanSide = -1 then
       // Self-play: time budget per move governs; depth is left wide open.
-      BestStr := GetBestMove(MoveTimeMs, 100)
+      BestStr := GetBestMove(MoveTimeMs, MAX_SEARCH_DEPTH)
     else
       // Human play: high allocated time is irrelevant; the depth limit governs.
       BestStr := GetBestMove(24 * 60 * 60 * 1000, PlayDepth);
@@ -7305,7 +7442,16 @@ var
     begin
       DoMakeMove(M);
       DisplayBoardSimple;
-      WriteLn('Engine: ', BestStr);
+      // v2.0.0: say where the move came from.
+      if LastMoveFromBook then
+        WriteLn('Engine: ', BestStr, '  (book move, ', BookFiles, ')')
+      else if InBook then
+      begin
+        WriteLn('Engine: ', BestStr, '  (out of book, searched)');
+        InBook := False;
+      end
+      else
+        WriteLn('Engine: ', BestStr);
       Result := True;
     end;
   end;
@@ -7368,25 +7514,32 @@ begin
   FillChar(History, SizeOf(History), 0);
 
   // Load / disable the opening book for this game.
+  // v2.0.0: (re)load whenever no book is in memory. The old test 'if not
+  // BookInitialized' never tried again after a load that found no .pgn, an
+  // 'n' game (which emptied the book) or bench (which empties it too), so a
+  // later 'y' silently played without a book. 'n' now only sets OwnBook
+  // false -- GetBestMove then never consults the book -- and keeps a loaded
+  // book in memory for the next 'y'.
   OwnBook := UseBook;   // v2.0: the play-mode choice is the OwnBook setting
   if UseBook then
   begin
-    if not BookInitialized then
+    if BookCount = 0 then
     begin
       WriteLn('info loading open book ......');
-      LoadAllOpeningBooks;
+      LoadAllOpeningBooks;   // reports the file(s) loaded, or that none was found
       BookInitialized := True;
-    end;
-  end
-  else
-    BookCount := 0;   // engine search only
+    end
+    else
+      WriteLn('Book: ', BookFiles, ' (', BookCount, ' positions)');
+  end;
+  InBook := UseBook and (BookCount > 0);
 
   DisplayBoardSimple;
 
   // --- Self-play mode: engine plays both sides (debugging) ---
   if HumanSide = -1 then
   begin
-    WriteLn('Self-play mode. Engine vs engine. Press q<Enter> at any time... (move cap 500).');
+    WriteLn('Self-play mode. Engine vs engine. Press q to stop after the current move (move cap 500).');
     MoveNo := 0;
     while True do
     begin
@@ -7398,6 +7551,11 @@ begin
       end;
       if not EngineMove then begin WriteLn('No legal engine move.'); Break; end;
       Inc(MoveNo);
+      if PlayStopRequested then   // v2.0.0: 'q' between moves
+      begin
+        WriteLn('Self-play stopped (q) after ', MoveNo, ' moves.');
+        Break;
+      end;
     end;
     InitState;
     WriteLn('Leaving play mode.');
@@ -7623,7 +7781,7 @@ begin
         WriteLn('id author Han Kleijn (Country: NL)');
         WriteLn('option name Hash type spin default ' + IntToStr(HASH_DEFAULT_MB) +
                 ' min ' + IntToStr(HASH_MIN_MB) + ' max ' + IntToStr(HASH_MAX_MB));
-        WriteLn('option name OwnBook type check default true');
+        WriteLn('option name OwnBook type check default false');
         WriteLn('option name LogFile type check default false');
         // Advertise the custom opening book path option to the GUI
         WriteLn('option name BookFile type string default *.pgn');
@@ -7901,23 +8059,28 @@ begin
           // v2.0.0beta1 a 'depth' UCI option existed; a GUI that sent its
           // advertised value 6 once limited every time-controlled game to
           // depth 6, ~200 Elo. The option is removed, see setoption.)
-          HardDepthLimit := 50;
+          HardDepthLimit := MAX_SEARCH_DEPTH;
           NodeLimit        := 0;  // Reset; only the 'nodes' branch sets a non-zero limit
           if SL.IndexOf('infinite') <> -1 then
           begin
-            HardDepthLimit := 50;
+            HardDepthLimit := MAX_SEARCH_DEPTH;
 
             // v1.00-rc3: no time management. TM_UNLIMITED_MS takes the no-TM
             // path in GetBestMove (both limits 0); the search runs to the
-            // depth 50 ceiling or until a 'stop' command, which is checked
+            // MAX_SEARCH_DEPTH ceiling or until a 'stop' command, which is checked
             // every PollNodes nodes (~1 ms) regardless of time-management mode.
             AllocatedTimeMs := TM_UNLIMITED_MS;
-            Log('Received go infinite. Searching until stop command or depth 50.');
+            Log('Received go infinite. Searching until stop command or depth ' + IntToStr(MAX_SEARCH_DEPTH) + '.');
           end
           else if SL.IndexOf('depth') <> -1 then
           begin
             HardDepthLimit := GetParamValue(SL, 'depth', 5);
             if HardDepthLimit < 1 then HardDepthLimit := 1;
+            if HardDepthLimit > MAX_SEARCH_DEPTH then   // v2.0.0
+            begin
+              WriteLn('info string go depth ', HardDepthLimit, ' limited to ', MAX_SEARCH_DEPTH);
+              HardDepthLimit := MAX_SEARCH_DEPTH;
+            end;
             Log('Received go depth ' + IntToStr(HardDepthLimit));
           end
           else if SL.IndexOf('movetime') <> -1 then
@@ -7925,7 +8088,7 @@ begin
             AllocatedTimeMs := GetParamValue(SL, 'movetime', 0);
             AllocatedTimeMs := AllocatedTimeMs - 50; // Safety margin
             if AllocatedTimeMs < 50 then AllocatedTimeMs := 50;
-            HardDepthLimit := 50;  // v2.0.0beta1: time decides, as for wtime/btime (was SearchDepth, default 10)
+            HardDepthLimit := MAX_SEARCH_DEPTH;  // v2.0.0beta1: time decides, as for wtime/btime (was SearchDepth, default 10)
             Log('Received go movetime ' + IntToStr(AllocatedTimeMs));
           end
 
@@ -7941,7 +8104,7 @@ begin
           begin
             NodeLimit       := GetParamValue(SL, 'nodes', 0);
             AllocatedTimeMs := 2147483647;  // Effectively unlimited time
-            HardDepthLimit  := 50;          // High depth ceiling; node limit decides
+            HardDepthLimit  := MAX_SEARCH_DEPTH;  // High depth ceiling; node limit decides
             Log('Received go nodes ' + IntToStr(NodeLimit));
           end
           else

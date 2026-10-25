@@ -1,6 +1,6 @@
 ================================================================================
 PasKnight — a UCI chess engine
-Version 1.0.1, homepage https://sourceforge.net/projects/pasknight/
+Version 2.0.0
 ================================================================================
 
 --------------------------------------------------------------------------------
@@ -11,26 +11,49 @@ interface of its own; it runs as a console application and communicates through
 text commands with a GUI such as Arena, Cute Chess, BanksiaGUI, or WinBoard/
 XBoard (via a UCI-to-XBoard adapter).
 
-Playing strength is about 2679 elo, see https://computerchess.org.uk/4040/index.html
-It is a classical hand-crafted-evaluation (HCE) engine — it does NOT use a neural
-network (NNUE). It runs on a single thread.
+Since v2.0 PasKnight evaluates positions with a neural network (NNUE) only; the
+hand-crafted evaluation (HCE) of v1.0 has been removed. The network is built
+into the executable, so no separate .nnue file is needed to play. The engine
+runs on a single thread and is built for Windows on CPUs with AVX2.
+
+Strength: the v1.0 HCE engine was estimated at roughly 2510-2540 Elo. An early
+NNUE net (NNUE5s) played at roughly 3000 in matches against other engines (a
+rough estimate, not a rating-list figure). The current net has not yet been
+measured against other engines.
+
+The hand-crafted v1.0 line is kept separately (v1.0.1).
 
 --------------------------------------------------------------------------------
 2. Source code and building
 --------------------------------------------------------------------------------
 PasKnight is written in Object Pascal for the Free Pascal Compiler (FPC 3.2.2)
-and the Lazarus IDE. It is a single-file program plus one include file for the
-offline evaluation tuner.
+and the Lazarus IDE. All files must be in the same folder:
 
-  - Engine:  pasknight.lpr
-  - Tuner:   pasknight_texel_tuner.pas  (compiled in only under -dTUNER)
+  - pasknight.lpr                main program (search, UCI, time management)
+  - pasknight_unit_nnue.pas      the NNUE: loader, accumulator, forward pass
+  - pasknight_net.inc            the embedded network, generated (see below)
+  - pasknight_nnue_cmds.inc      the "nnue" validation commands
+  - pasknight_nnue_gendata.inc   the training-data generator (GenData build)
 
-Build the engine from the command line with:
+The Lazarus project has two build modes, both with target processor COREAVX2:
 
-    fpc -O3 pasknight.lpr
+  - Release   the UCI engine, used for play, bench and matches
+  - GenData   adds the "gendata" command (define NNUE_GENDATA); for generating
+              training data only, never for matches
 
-This produces the UCI executable. The tuner is a separate offline build enabled
-by the TUNER define (see section 10); a normal engine build does not include it.
+From the command line:
+
+    fpc -O3 -CpCOREAVX2 pasknight.lpr                    (Release)
+    fpc -O3 -CpCOREAVX2 -dNNUE_GENDATA pasknight.lpr     (GenData)
+
+The embedded network. pasknight_net.inc holds the .nnue file byte for byte as a
+Pascal constant array (about 1.7 MB of source; the executable grows by about
+411 KB). It is written by the engine itself and must not be edited by hand. To
+build a different network into the executable:
+
+    nnue embed C:\path\nnue10.nnue C:\path\pasknight_net.inc
+
+then rebuild both build modes. The startup line names the embedded net.
 
 --------------------------------------------------------------------------------
 3. Core loop
@@ -38,11 +61,11 @@ by the TUNER define (see section 10); a normal engine build does not include it.
 PasKnight follows the standard UCI cycle:
 
   - Listens for UCI commands (uci, isready, ucinewgame, position, go, stop,
-    setoption, quit, plus the extra display / bench / help / play commands).
+    setoption, quit, plus the extra commands listed in section 13).
   - Maintains its internal board state from position commands, supporting both
     "startpos" and full FEN strings, each optionally followed by a move list.
   - Searches for the best move on "go", honouring the time control or an
-    explicit depth / movetime / nodes limit.
+    explicit depth / movetime / nodes limit, or "infinite" until "stop".
   - Streams search statistics ("info depth ... seldepth ... score ... nodes ...
     nps ... hashfull ... pv ...") and finally reports the chosen move with
     "bestmove".
@@ -56,12 +79,16 @@ PasKnight follows the standard UCI cycle:
     on a square.
   - Magic bitboards: sliding-piece attacks (bishop, rook, queen) are generated
     by plain magic bitboard lookups — no ray-walking at runtime. Portable plain
-    magics (no PEXT/BMI2) are used so the same code path runs on every target.
-    The magic tables are re-verified constructively at startup.
+    magics (no PEXT/BMI2) are used. The magic tables are re-verified
+    constructively at startup.
   - Incremental state: king positions, castling rights, en-passant square, and
     the half-move (fifty-move) clock are tracked incrementally rather than
     recomputed. Search uses copy/restore of the game state (no separate
     make/unmake path), so all incremental fields roll back for free.
+  - NNUE accumulator: updated incrementally at the single place where pieces
+    are placed on or removed from the bitboards, so en passant, castling and
+    promotions are handled by construction. The accumulator stack index is part
+    of the game state, so copy/restore unwinds it as well.
 
 --------------------------------------------------------------------------------
 5. Move generation
@@ -87,7 +114,8 @@ The search is a Negamax alpha-beta with a modern selective-search feature set.
   - Principal Variation Search (PVS): the first move is searched with a full
     window, the rest with null windows and re-searched only on a fail-high.
   - Aspiration windows: deeper iterations start with a narrow window around the
-    previous score, widening on fail-high/low.
+    previous score, widening on fail-high/low. The initial window was re-tuned
+    for the NNUE evaluation scale in v2.0.
   - Transposition-table cut-offs and move ordering (see sections 7 and 8).
   - Quiescence search: at the search horizon the engine keeps searching only
     captures, promotions, and check evasions (with delta pruning and SEE
@@ -137,54 +165,66 @@ To maximise alpha-beta cut-offs, moves are tried best-first:
     previously searched positions. It is runtime-resizable through the UCI Hash
     option and uses a compact 16-byte packed entry (move in 19 bits, plus score,
     depth, and flag), giving high entry density and good cache behaviour.
-  - Pawn hash table: the pawn-structure part of the evaluation depends only on
-    the pawn placement, which repeats constantly during a search. A separate
-    incremental pawn-only Zobrist key indexes a pawn hash that caches this work,
-    so pawn-structure terms are recomputed only on a miss.
+  - Evaluation cache (new in v2.0): a 1 MB table (2^17 entries) maps the
+    position key to the network's evaluation, so a position met again is not
+    evaluated twice. It returns exactly the stored value, so node counts do not
+    depend on it, only speed. It is cleared whenever the network changes.
+    (The pawn hash of v1.0 was removed together with the hand-crafted eval.)
   - Repetition and draw detection: game-history hashes detect three-fold
     repetition; the half-move clock enforces the fifty-move rule; and there is
     insufficient-material detection.
 
 --------------------------------------------------------------------------------
-9. Evaluation function
+9. Evaluation function (NNUE)
 --------------------------------------------------------------------------------
-The evaluation is tapered between a middlegame (MG) and an endgame (EG) score,
-interpolated by a game-phase value derived from the remaining non-pawn material.
-Nearly all evaluation weights are Texel-tuned (fitted offline to game results;
-see section 10). Terms include:
+The evaluation is a small efficiently-updatable neural network:
 
-  - Material and piece-square tables: PeSTO-style tapered piece values and full
-    MG/EG piece-square tables.
-  - Pawn structure: passed pawns scored by rank (separate MG/EG tables);
-    connected / phalanx pawns by rank; doubled, isolated, and backward-pawn
-    penalties.
-  - Piece activity: per-piece-type mobility tables indexed by the number of
-    "safe" moves (squares not attacked by enemy pawns); knight and bishop
-    outposts by rank; a "bad bishop" penalty for own pawns blocked on the
-    bishop's own colour complex; a bishop-pair bonus.
-  - Rooks: bonuses for rooks on open / semi-open files, on the 7th rank, and
-    behind passed pawns (own or enemy).
-  - King safety (middlegame): a nonlinear king-safety table driven by weighted
-    counts of attackers around the king, plus a rank-indexed pawn-shield term.
-  - King activity (endgame): king centralisation, and a king-to-passed-pawn
-    distance term (the defending king wants to be near enemy passers, the
-    attacking king near its own).
-  - Threats: small bonuses for pawns attacking pieces, minors attacking heavy
-    pieces, and hanging (attacked-and-undefended) pieces.
+    768 piece-square inputs + side to move -> 256 -> 32 -> 1
+
+  - Inputs: one feature per (piece, square), 12 x 64 = 768, feeding a single
+    white-point-of-view accumulator of 256 neurons. A side-to-move column of
+    256 weights is added at evaluation time when Black is to move, so the net
+    learns the value of having the move itself.
+  - Layers: clipped ReLU after each hidden layer; output in centipawns.
+  - Integer arithmetic throughout: int16 weights and accumulator, int32 layer
+    sums, quantisation scales QA = QB = 1024, output scale 400. The Pascal
+    integer path is checked bit for bit against a Python reference.
+  - Speed: AVX2 kernels (dot product, accumulator add/subtract, vector clipped
+    ReLU) are chosen at runtime by CPUID; SSE2 kernels remain as a fallback and
+    give identical results. "setoption name UseAVX2 value false" forces SSE2.
+  - No king buckets, no second perspective (planned for after v2.0.0).
+
+The network file format ("format 2"): 410,856 bytes, magic 'PKNU', version 2,
+geometry and scales in the header, and a trailing byte-sum checksum. Every net
+— the embedded one at each startup, or an external file — passes the same
+checks (magic, version, geometry, scales, exact size, checksum) before it is
+used. A net that fails is refused, and without a net the engine does not
+search. Format-1 nets (no side-to-move input, v1.10 era) are no longer
+accepted.
+
+The embedded net of this version is nnue10.
 
 --------------------------------------------------------------------------------
-10. Evaluation tuning (offline)
+10. Network training (offline)
 --------------------------------------------------------------------------------
-The evaluation weights were fitted with an offline Texel tuner
-(pasknight_texel_tuner.pas), a separate build enabled by the TUNER define. It
-minimises the error between a sigmoid of the static evaluation and known game
-results over large sets of labelled quiet positions (Zurichess quiet-labeled
-and lichess-big3-resolved formats are both supported). It uses an Adam
-optimiser with L2 anchoring, exactly reconstructs each evaluation term as a
-linear combination of the tunable parameters (verified per position), and emits
-the tuned parameter block as ready-to-paste Pascal. This tuner is only for
-development; it is not part of the normal engine binary and is not needed to
-play.
+The networks are trained on PasKnight's own games; nothing in this pipeline is
+part of the normal engine binary or needed to play.
+
+  - Data: the GenData build plays self-play games ("gendata selfplay") with a
+    fixed node budget per move, from random openings or a PGN book plus a few
+    random moves. Each position is stored (32 bytes) with the search score and
+    the final game result.
+  - Each new net labels the next generation's data, so strength builds up
+    generation by generation.
+  - Training is done in Python (outside this source tree): merging and
+    splitting by game, training against a mix of the search score and the game
+    result, and exporting the quantised .nnue file with test vectors.
+  - Every new net passes engine gates (test vectors exact, an accumulator
+    consistency check over long random games, bench) and is then tested in
+    matches before it is promoted and embedded.
+
+The Texel tuner of v1.0 was removed together with the hand-crafted evaluation;
+it remains in the v1.0.1 tree.
 
 --------------------------------------------------------------------------------
 11. Time management
@@ -199,28 +239,75 @@ allocation from the remaining clock, the increment, and the moves-to-go, then:
   - has an emergency mid-search abort ceiling for the rare case where a single
     deepening iteration runs far over budget, with partial-depth recovery.
 
+Move overhead (new in v2.0) is measured, not configured: the engine compares
+what the GUI charged for its previous move with its own measured thinking time,
+and also times its own stop-and-reply delay. The overhead is subtracted from
+the clock before the allocation is computed. It uses a 1 ms clock and polls it
+about every millisecond. There is no MoveOverhead option.
+
 --------------------------------------------------------------------------------
 12. Opening book
 --------------------------------------------------------------------------------
-PasKnight can play from an opening book placed in the same directory as the
-executable, using book moves while the position is still in book and switching
-to search once it leaves book.
+PasKnight can play from opening books in PGN format placed in the same
+directory as the executable. It uses book moves while the position is still in
+book and switches to search once it leaves book. Moves that occur more often in
+the book are chosen more often.
+
+  - OwnBook (default true) switches the book on or off. For engine matches with
+    an opening suite, set OwnBook to false.
+  - BookFile selects the book file(s); the default loads every .pgn file in the
+    executable's directory.
+  - The book is loaded at the first "isready" (or "go"), and the engine
+    reports which file(s) it loaded.
 
 --------------------------------------------------------------------------------
 13. UCI options and extra commands
 --------------------------------------------------------------------------------
-  - UCI option: Hash (transposition-table size in MB; the pawn hash is sized
-    from the same budget).
-  - Extra console commands beyond the UCI standard: "display" (ASCII board),
-    "bench" (fixed benchmark over a set of positions, optionally to a given
-    depth), "help", and "play" (a minimal text interface).
+UCI options:
+
+  - Hash      transposition-table size in MB (default 256, 1-4096).
+  - EvalFile  the network. Default <embedded>: the net built into the
+              executable. A path loads an external .nnue file instead (use an
+              absolute path). If that file cannot be loaded, NO net is loaded
+              and the engine will not search ("go" answers bestmove 0000), so a
+              wrong path is noticed at once. <embedded> or an empty value
+              returns to the built-in net.
+  - UseAVX2   use the AVX2 kernels when the CPU has them (default true).
+  - OwnBook   use the opening book (default true).
+  - BookFile  opening-book file name (PGN, in the executable's directory).
+  - LogFile   write a log file next to the executable (default false).
+
+A depth limit is given per search with "go depth N" (the "depth" option of
+earlier versions was removed in 2.0.0ß1).
+
+The startup line, the "uci" reply and every "isready" name the network in use,
+e.g. "embedded net (nnue10, 410856 bytes)" or the path of an external file.
+
+Extra console commands beyond the UCI standard:
+
+  - display                  ASCII board
+  - bench [depth]            fixed benchmark over a set of positions
+  - go perft N / perftauto   move-generator node counts
+  - play                     a minimal text interface
+  - help                     the full command list
+  - nnue check [plies]       accumulator consistency over a long random game
+  - nnue testvec <file>      the integer forward pass against test vectors
+  - nnue stats               net in use, accumulator and cost counters
+  - nnue embed <file.nnue> <out.inc> [name]
+                             check a net and write it as pasknight_net.inc,
+                             to build it into the executable
+  - gendata selfplay ...     training data (GenData build only)
 
 --------------------------------------------------------------------------------
-14. Not included (by design, in the v1.00 / HCE phase)
+14. Not included
 --------------------------------------------------------------------------------
-  - NNUE neural-network evaluation
   - Multi-threaded search (Lazy SMP)
   - Endgame tablebases (Syzygy)
+  - Larger network designs: two perspectives (side-to-move-relative output) and
+    king buckets are planned for after v2.0.0.
 
-These are potential directions beyond v1.00 but are intentionally out of scope
-for the hand-crafted-evaluation release.
+--------------------------------------------------------------------------------
+15. Licence
+--------------------------------------------------------------------------------
+Copyright (C) 2026 by Han Kleijn, www.hnsky.org. The source code is subject to
+the terms of the Mozilla Public License, v. 2.0 (https://mozilla.org/MPL/2.0/).
